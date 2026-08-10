@@ -119,3 +119,65 @@ Local paints apply immediately (optimistic echo), buffer up to 0.5 s / 80 ops, t
 Freehand strokes, multiple named canvases, per-pixel author attribution, minimap button,
 canvas export, cross-faction/cross-realm sync beyond what addon channels allow, permissions
 (anyone in scope can paint or clear — like a real whiteboard).
+
+---
+
+# v0.2 — Portraits and invitations (2026-08-10, user-requested)
+
+**Requirement:** players can create a new *portrait* and invite other addon users to paint it.
+
+## Model
+
+A **portrait** is the document unit: `{ id, name, dist, members?, cells, rev }`.
+- `id`: 6 chars from the wire alphabet, randomly generated at creation (64^6 space, no
+  coordination needed). The built-in **Shared** portrait has the reserved id `000000` on every
+  client — it preserves v0.1 behavior exactly (scope broadcast, implicit membership).
+- `dist`: `MEMBERS` for created portraits (whisper fan-out to the roster — members need no
+  common guild or group), or a scope (`AUTO`/`GUILD`/`PARTY`/`RAID`) for the Shared portrait.
+- `members`: full `Name-Realm` list, **add-only set** (union-merged, so concurrent invites by
+  different members converge). Leaving = deleting the portrait locally; remaining members'
+  whispers to the departed player are wasted but bounded. Accepted v0.2 limitation.
+
+SavedVariables becomes `{ dbVersion = 2, portraits = { [id] = portrait }, activeId, pos }`;
+v1 data migrates into the Shared portrait.
+
+## Protocol changes
+
+Every existing message gains a fixed-width 6-char portrait id right after the kind byte
+(`B<id><ops>`, `C<id>`, `H<id>:<rev>:<ver>`, `Q/O/G/S/R` likewise). Scope portraits keep
+broadcast delivery for B/C/H; member portraits send everything as whispers to each roster
+member. Sync (H/Q/O/G/S/R) is unchanged, just id-scoped; one inbound snapshot transfer at a
+time globally, buffered events tagged with the portrait id.
+
+New whisper-only messages:
+| Msg | Form | Meaning |
+|-----|------|---------|
+| I | `I<id>:<name>` | invite to portrait (any member may invite; recipient gets accept/decline popup) |
+| J | `J<id>` | invite accepted (honored only if we invited that player for that id within 120 s) |
+| M | `M<id>:<name1>,<name2>,…` | roster update, union-merge; chunked if long; trusted only from existing members |
+
+Accept flow: invitee creates a local stub `{members = {self, inviter}}`, whispers `J`; the
+inviter adds them, whispers the full roster (`M`) to every member, and streams the canvas
+(`S` chunks) straight to the new member (no offer negotiation — the inviter is the source).
+
+Trust rules: B/C/M/paint-affecting messages for a member portrait are accepted only from
+players already on the local roster; `J` only from pending invitees; `I` from anyone (that is
+its purpose); unknown portrait ids are ignored (ids are unguessable in practice).
+
+## UI
+
+- Title shows the active portrait's name; a second bottom row adds **[Portrait ▸]** (cycle),
+  **[New]** (name popup), **[Invite]** (uses friendly player target, else name popup).
+  Frame grows ~30 px.
+- Scope button applies to the Shared portrait only; member portraits show `Members: N` with a
+  roster tooltip.
+- Slash additions: `/wowpaint new <name>`, `invite <name>`, `list`, `open <name>`,
+  `delete <name>`.
+
+## Accepted trade-offs (v0.2)
+
+- Whisper fan-out costs (N−1) messages per paint batch; with the 0.35 s send throttle a
+  ~6-member portrait stays smooth, larger rosters get laggier strokes rather than disconnects.
+- No leave protocol, no kick, no ownership enforcement beyond roster trust.
+- Offline members simply miss events and re-sync via rev negotiation next time both sides
+  are online with the portrait open.
