@@ -8,12 +8,20 @@ WP.UI = UI
 local CELL = 8                      -- on-screen pixels per canvas cell
 local GRID = Canvas.SIZE * CELL     -- 512
 local FRAME_W = GRID + 28
-local FRAME_H = 620
+-- Tall enough that the bottom bar (22px buttons + 14px margin) clears the
+-- canvas, whose bottom edge sits 586px from the frame top.
+local FRAME_H = 630
 
 local SWATCH = 24
 local SWATCH_GAP = 8
 
-local CHANNEL_LABELS = { AUTO = "Auto", GUILD = "Guild", PARTY = "Party", RAID = "Raid" }
+local CHANNEL_LABELS = {
+    AUTO = "Auto",
+    GUILD = "Guild",
+    PARTY = "Party",
+    RAID = "Raid",
+    INSTANCE_CHAT = "Instance",
+}
 local CHANNEL_ORDER = { "AUTO", "GUILD", "PARTY", "RAID" }
 
 UI.selectedColor = 3 -- black
@@ -38,6 +46,9 @@ function UI:EnsureFrame()
 
     local f = CreateFrame("Frame", "WoWPaintFrame", UIParent, "BackdropTemplate")
     self.frame = f
+    -- CreateFrame returns a shown frame; start hidden so Toggle's first
+    -- IsShown() check takes the Show() path and OnShow actually fires.
+    f:Hide()
     f:SetSize(FRAME_W, FRAME_H)
     f:SetFrameStrata("MEDIUM")
     f:SetToplevel(true)

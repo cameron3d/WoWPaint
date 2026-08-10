@@ -24,8 +24,11 @@ SavedVariables, and late joiners sync the current picture from whoever has the n
 ### Transport
 WoW addons have no network access; the only peer channel is `C_ChatInfo.SendAddonMessage`.
 Custom chat channels no longer carry addon messages (removed in the 8.x engine Classic runs on),
-so distribution options are **GUILD / PARTY / RAID / WHISPER**. Default scope: **Auto**
-(Raid → Party → Guild); user can pin Guild/Party/Raid. Whisper is used only for sync streaming.
+so distribution options are **GUILD / PARTY / RAID / INSTANCE_CHAT / WHISPER** (instance-category
+groups such as battlegrounds only deliver on INSTANCE_CHAT). Default scope: **Auto**
+(Instance → Raid → Party → Guild); user can pin Guild/Party/Raid. Whisper is used only for sync
+streaming, and each message type is accepted only from the channel kind that legitimately
+produces it (paints/clears/hellos from group broadcasts, sync negotiation from whispers).
 
 Constraints respected:
 - Payload ≤ 255 bytes per message.

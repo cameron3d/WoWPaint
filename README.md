@@ -16,8 +16,8 @@ running the addon sees the picture evolve live, and it persists between sessions
 - `/wowpaint` (or `/wpaint`) — toggle the canvas window.
 - **Left-click / drag** paints with the selected color; **right-click / drag** erases.
 - The palette row selects one of 16 colors (classic r/place palette).
-- **Scope** button cycles Auto → Guild → Party → Raid. *Auto* prefers Raid, then Party, then
-  Guild. Paint ops broadcast to that scope only.
+- **Scope** button cycles Auto → Guild → Party → Raid. *Auto* prefers your battleground/instance
+  group, then Raid, then Party, then Guild. Paint ops broadcast to that scope only.
 - **Clear** wipes the canvas for everyone in scope (confirmation dialog first).
 - `/wowpaint sync` — re-request the latest canvas from peers.
 - `/wowpaint channel guild` — pin the broadcast scope.

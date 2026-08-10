@@ -10,18 +10,27 @@ Comm.PREFIX = "WoWPaint"
 -- One send per interval keeps worst-case throughput around 730 B/s, below
 -- the ~800 B/s rate the chat server tolerates indefinitely.
 local QUEUE_INTERVAL = 0.35
-local FLUSH_INTERVAL = 0.5    -- how often locally painted pixels are broadcast
-local MAX_OPS_PER_MSG = 78    -- 3 chars per op; keeps total payload under 240
-local SNAP_CHUNK = 200        -- snapshot data characters per whisper
-local OFFER_WINDOW = 3        -- seconds spent collecting snapshot offers
-local SYNC_TIMEOUT = 15       -- abort a stalled snapshot transfer after this
-local HELLO_MIN_INTERVAL = 60 -- throttle for automatic hello broadcasts
-local OFFER_MIN_INTERVAL = 30 -- per-target throttle for snapshot offers
+local FLUSH_INTERVAL = 0.5      -- how often locally painted pixels are broadcast
+local MAX_OPS_PER_MSG = 78      -- 3 chars per op; keeps total payload under 240
+local SNAP_CHUNK = 200          -- snapshot data characters per whisper
+local OFFER_WINDOW = 3          -- seconds spent collecting snapshot offers
+local SYNC_TIMEOUT = 15         -- abort when chunks stall this long mid-transfer
+local SYNC_FIRST_TIMEOUT = 60   -- allowance for the first chunk: the source may
+                                -- be streaming a full canvas to someone else
+                                -- ahead of us in its send queue
+local HELLO_MIN_INTERVAL = 60   -- throttle for automatic hello broadcasts
+local OFFER_MIN_INTERVAL = 30   -- per-target throttle for snapshot offers
+local SNAP_MIN_INTERVAL = 30    -- per-requester throttle for snapshot streams
+
+-- Each message type is only ever produced on one kind of channel; anything
+-- arriving elsewhere is forged (e.g. a whispered clear from a stranger).
+local BROADCAST_CHANNELS = { GUILD = true, PARTY = true, RAID = true, INSTANCE_CHAT = true }
 
 Comm.queue = {}
 Comm.pendingOps = {}          -- locally painted ops awaiting broadcast
-Comm.bufferedBatches = {}     -- remote batches received while syncing
+Comm.bufferedEvents = {}      -- ordered B/C events deferred while syncing
 Comm.lastOfferAt = {}
+Comm.lastSnapAt = {}
 Comm.sync = nil               -- active inbound snapshot transfer
 Comm.offerWindow = nil        -- open offer-collection window
 
@@ -36,19 +45,31 @@ function Comm:Init()
 end
 
 -- Resolve the chat type to broadcast on, honoring the user's pinned scope.
--- Returns nil when the pinned (or any) scope is unavailable.
+-- Returns nil when the pinned (or any) scope is unavailable. Battleground
+-- and instance groups only deliver addon messages on INSTANCE_CHAT — the
+-- bare "RAID"/"PARTY" chat types fail silently there — so instance-category
+-- membership is checked explicitly.
 function Comm:GetDistribution()
     local mode = WP.db and WP.db.channel or "AUTO"
+    local inInstanceGroup = IsInGroup(LE_PARTY_CATEGORY_INSTANCE)
     if mode == "GUILD" then
         return IsInGuild() and "GUILD" or nil
     elseif mode == "RAID" then
-        return IsInRaid() and "RAID" or nil
+        if IsInRaid(LE_PARTY_CATEGORY_HOME) then
+            return "RAID"
+        end
+        return inInstanceGroup and "INSTANCE_CHAT" or nil
     elseif mode == "PARTY" then
-        return IsInGroup() and "PARTY" or nil
+        if IsInGroup(LE_PARTY_CATEGORY_HOME) then
+            return "PARTY"
+        end
+        return inInstanceGroup and "INSTANCE_CHAT" or nil
     end
-    if IsInRaid() then
+    if inInstanceGroup then
+        return "INSTANCE_CHAT"
+    elseif IsInRaid(LE_PARTY_CATEGORY_HOME) then
         return "RAID"
-    elseif IsInGroup() then
+    elseif IsInGroup(LE_PARTY_CATEGORY_HOME) then
         return "PARTY"
     elseif IsInGuild() then
         return "GUILD"
@@ -109,6 +130,12 @@ function Comm:FlushPaintOps()
     self.pendingOps = {}
     WP.db.rev = WP.db.rev + 1
     self:Broadcast("B" .. ops)
+    if self.sync then
+        -- The snapshot in flight predates these strokes; re-apply them on
+        -- top of it once it lands. rev was already counted at flush time,
+        -- so the replay must not count it again.
+        self.bufferedEvents[#self.bufferedEvents + 1] = { ops = ops, own = true }
+    end
     WP.UI:UpdateStatus()
 end
 
@@ -131,6 +158,9 @@ function Comm:SendClear()
     if not WP.db then
         return
     end
+    -- Unflushed strokes predate the clear; broadcasting them afterward
+    -- would resurrect them on peers only.
+    self.pendingOps = {}
     Canvas.Clear(WP.db.cells)
     WP.db.rev = WP.db.rev + 1
     WP.UI:RedrawAll()
@@ -219,19 +249,23 @@ function Comm:AcceptBestOffer()
         rev = nil,
         lastAt = GetTime(),
     }
-    self.bufferedBatches = {}
+    self.bufferedEvents = {}
     self:Whisper("G", w.sender)
     WP.UI:UpdateStatus()
     self:WatchSync()
 end
 
 function Comm:WatchSync()
-    C_Timer.After(SYNC_TIMEOUT, function()
+    C_Timer.After(5, function()
         local s = self.sync
         if not s then
             return
         end
-        if GetTime() - s.lastAt >= SYNC_TIMEOUT - 0.5 then
+        -- Before the first chunk arrives, the source may still be draining
+        -- another requester's snapshot through its throttled queue, so give
+        -- it much longer than the between-chunk stall limit.
+        local limit = s.received == 0 and SYNC_FIRST_TIMEOUT or SYNC_TIMEOUT
+        if GetTime() - s.lastAt >= limit then
             self:AbortSync()
         else
             self:WatchSync()
@@ -246,16 +280,33 @@ function Comm:AbortSync()
     WP.UI:UpdateStatus()
 end
 
+-- Apply B/C events that arrived while a snapshot was in flight, in their
+-- original order. Remote events still owe a rev bump; our own flushed
+-- batches (own = true) were counted when they were sent.
 function Comm:ReplayBuffered()
-    local batches = self.bufferedBatches
-    self.bufferedBatches = {}
-    for _, ops in ipairs(batches) do
-        self:ApplyOps(ops)
-        WP.db.rev = WP.db.rev + 1
+    local events = self.bufferedEvents
+    self.bufferedEvents = {}
+    for _, ev in ipairs(events) do
+        if ev.clear then
+            Canvas.Clear(WP.db.cells)
+            WP.UI:RedrawAll()
+            WP.db.rev = WP.db.rev + 1
+        elseif ev.ops then
+            self:ApplyOps(ev.ops)
+            if not ev.own then
+                WP.db.rev = WP.db.rev + 1
+            end
+        end
     end
 end
 
 function Comm:OnGet(sender)
+    local now = GetTime()
+    local last = self.lastSnapAt[sender]
+    if last and now - last < SNAP_MIN_INTERVAL then
+        return
+    end
+    self.lastSnapAt[sender] = now
     local data = Canvas.Serialize(WP.db.cells)
     local total = math.ceil(#data / SNAP_CHUNK)
     local rev = WP.db.rev
@@ -319,23 +370,41 @@ function Comm:OnMessage(prefix, text, channel, sender)
         return
     end
     local kind = text:sub(1, 1)
+    -- B/C/H only ever travel on group broadcasts and Q/O/G/S only on
+    -- whispers; enforcing that stops strangers outside the scope from
+    -- whispering forged paints/clears or triggering snapshot streams via a
+    -- group channel.
+    if kind == "B" or kind == "C" or kind == "H" then
+        if not BROADCAST_CHANNELS[channel] then
+            return
+        end
+    elseif channel ~= "WHISPER" then
+        return
+    end
     if kind == "B" then
         local ops = text:sub(2)
         if #ops == 0 or #ops % 3 ~= 0 then
             return
         end
         if self.sync then
-            self.bufferedBatches[#self.bufferedBatches + 1] = ops
+            self.bufferedEvents[#self.bufferedEvents + 1] = { ops = ops }
             return
         end
         self:ApplyOps(ops)
         WP.db.rev = WP.db.rev + 1
         WP.UI:UpdateStatus()
     elseif kind == "C" then
-        Canvas.Clear(WP.db.cells)
-        WP.db.rev = WP.db.rev + 1
-        WP.UI:RedrawAll()
-        WP.UI:UpdateStatus()
+        self.pendingOps = {}
+        if self.sync then
+            -- Defer alongside batches so the snapshot in flight cannot
+            -- resurrect the canvas this clear just wiped everywhere else.
+            self.bufferedEvents[#self.bufferedEvents + 1] = { clear = true }
+        else
+            Canvas.Clear(WP.db.cells)
+            WP.db.rev = WP.db.rev + 1
+            WP.UI:RedrawAll()
+            WP.UI:UpdateStatus()
+        end
         WP.Print(Ambiguate(sender, "short") .. " cleared the canvas.")
     elseif kind == "H" then
         local rev = tonumber(text:match("^H:(%d+)"))
