@@ -1,0 +1,13 @@
+## Interface: 11507
+## Title: WoWPaint
+## Notes: Collaborative pixel painting with your guild, party, or raid.
+## Version: 0.1.0
+## SavedVariables: WoWPaintDB
+## X-Website: https://github.com/cameron-merrill/WoWPaint
+## X-Category: Miscellaneous
+
+Util.lua
+Canvas.lua
+Comm.lua
+UI.lua
+Core.lua
