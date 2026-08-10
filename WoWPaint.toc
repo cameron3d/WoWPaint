@@ -3,7 +3,7 @@
 ## Notes: Collaborative pixel painting: shared canvases, invite-only portraits, and a gallery.
 ## Version: 0.4.1
 ## SavedVariables: WoWPaintDB
-## X-Website: https://github.com/cameron-merrill/WoWPaint
+## X-Website: https://github.com/cameron3d/WoWPaint
 ## X-Category: Miscellaneous
 
 Util.lua
