@@ -269,9 +269,20 @@ function UI:EnsureFrame()
 
     tinsert(UISpecialFrames, "WoWPaintFrame")
 
+    -- The picker floats free of this window, so it has to be re-anchored
+    -- whenever the canvas appears or disappears underneath it.
     f:SetScript("OnShow", function()
+        if UI.picker:IsShown() then
+            UI:AnchorPicker()
+        end
         UI:UpdateAll()
         WP.Comm:SendHello(Portraits.Active(), false)
+    end)
+    f:SetScript("OnHide", function()
+        if UI.picker:IsShown() then
+            UI:AnchorPicker()
+            UI:RefreshPicker()
+        end
     end)
 end
 
@@ -829,11 +840,20 @@ end
 -- Side panels
 ----------------------------------------------------------------------
 
+-- side "FLOAT" makes the panel a sibling of the main window rather than a
+-- child, so it can stand on its own when the canvas is closed. Its position
+-- is set by the caller.
 local function BuildPanel(f, globalName, titleText, w, h, side)
-    local g = CreateFrame("Frame", globalName, f, "BackdropTemplate")
+    local float = side == "FLOAT"
+    local g = CreateFrame("Frame", globalName, float and UIParent or f, "BackdropTemplate")
     g:Hide()
     g:SetSize(w, h)
-    if side == "LEFT" then
+    if float then
+        -- HIGH, not DIALOG: above the canvas window, but still below the
+        -- StaticPopups this panel opens.
+        g:SetFrameStrata("HIGH")
+        g:SetClampedToScreen(true)
+    elseif side == "LEFT" then
         g:SetPoint("TOPRIGHT", f, "TOPLEFT", 8, 0)
     else
         g:SetPoint("TOPLEFT", f, "TOPRIGHT", -8, 0)
@@ -1006,7 +1026,9 @@ end
 ----------------------------------------------------------------------
 
 function UI:BuildPickerPanel(f)
-    local g = BuildPanel(f, "WoWPaintPortraitsFrame", "Portraits", 300, 410, "LEFT")
+    -- Floating: this is also what the minimap button opens, and it has to
+    -- work as a launcher with the canvas window closed.
+    local g = BuildPanel(f, "WoWPaintPortraitsFrame", "Portraits", 300, 440, "FLOAT")
     self.picker = g
 
     self.pickerRows = {}
@@ -1047,13 +1069,46 @@ function UI:BuildPickerPanel(f)
         UI:RefreshPicker()
     end)
 
+    local canvasBtn = CreateFrame("Button", nil, g, "UIPanelButtonTemplate")
+    canvasBtn:SetSize(150, 22)
+    canvasBtn:SetPoint("BOTTOM", g, "BOTTOM", 0, 94)
+    canvasBtn:SetText("Open the canvas")
+    canvasBtn:SetScript("OnClick", function()
+        UI.frame:Show()
+    end)
+    self.pickerCanvasBtn = canvasBtn
+
     local newBtn = CreateFrame("Button", nil, g, "UIPanelButtonTemplate")
-    newBtn:SetSize(150, 22)
-    newBtn:SetPoint("BOTTOM", g, "BOTTOM", 0, 42)
+    newBtn:SetSize(132, 22)
+    newBtn:SetPoint("BOTTOM", g, "BOTTOM", -68, 42)
     newBtn:SetText("New portrait")
     newBtn:SetScript("OnClick", function()
         StaticPopup_Show("WOWPAINT_NEW")
     end)
+
+    local galleryBtn = CreateFrame("Button", nil, g, "UIPanelButtonTemplate")
+    galleryBtn:SetSize(132, 22)
+    galleryBtn:SetPoint("BOTTOM", g, "BOTTOM", 68, 42)
+    galleryBtn:SetText("Gallery")
+    galleryBtn:SetScript("OnClick", function()
+        -- Viewing a saved piece renders it into the main canvas grid, so the
+        -- gallery only makes sense with the window up.
+        UI.frame:Show()
+        if not UI.gallery:IsShown() then
+            UI:ToggleGallery()
+        end
+    end)
+end
+
+-- Beside the canvas when it is open, centre-screen when it is not.
+function UI:AnchorPicker()
+    local g = self.picker
+    g:ClearAllPoints()
+    if self.frame:IsShown() then
+        g:SetPoint("TOPRIGHT", self.frame, "TOPLEFT", 8, 0)
+    else
+        g:SetPoint("CENTER", UIParent, "CENTER", 0, 0)
+    end
 end
 
 function UI:TogglePicker()
@@ -1062,6 +1117,7 @@ function UI:TogglePicker()
     else
         self.members:Hide()
         self.pickerPage = 1
+        self:AnchorPicker()
         self.picker:Show()
         self:RefreshPicker()
     end
@@ -1106,6 +1162,7 @@ function UI:RefreshPicker()
     end
     self.pickerPageText:SetText(("Page %d / %d  -  %d portrait%s"):format(
         page, pages, #list, #list == 1 and "" or "s"))
+    self.pickerCanvasBtn:SetEnabled(not self.frame:IsShown())
 end
 
 function UI:OpenPortrait(id)
@@ -1114,6 +1171,9 @@ function UI:OpenPortrait(id)
         return
     end
     self.galleryView = nil
+    -- Picking a portrait is a request to paint it, including from the
+    -- minimap launcher with the canvas closed.
+    self.frame:Show()
     self:UpdateAll()
     WP.Comm:SendHello(p, false)
     WP.Print("Now painting '" .. p.name .. "'.")
@@ -1506,4 +1566,119 @@ function UI:Toggle()
     else
         self.frame:Show()
     end
+end
+
+----------------------------------------------------------------------
+-- Minimap button
+----------------------------------------------------------------------
+
+local MINIMAP_RADIUS = 80
+-- WoW runs Lua 5.1 (math.atan2); the two-argument math.atan of 5.4 is the
+-- same function, which keeps this file loadable off-client too.
+local atan2 = math.atan2 or math.atan
+
+function UI:PositionMinimapButton()
+    local b = self.minimapBtn
+    if not b then
+        return
+    end
+    local angle = math.rad(WP.db.minimap.angle or 200)
+    b:ClearAllPoints()
+    b:SetPoint("CENTER", Minimap, "CENTER",
+        math.cos(angle) * MINIMAP_RADIUS, math.sin(angle) * MINIMAP_RADIUS)
+end
+
+local function DragUpdate()
+    local mx, my = Minimap:GetCenter()
+    if not mx then
+        return
+    end
+    local scale = Minimap:GetEffectiveScale()
+    local cx, cy = GetCursorPosition()
+    WP.db.minimap.angle = math.deg(atan2(cy / scale - my, cx / scale - mx)) % 360
+    UI:PositionMinimapButton()
+end
+
+function UI:EnsureMinimapButton()
+    if self.minimapBtn or not Minimap then
+        return
+    end
+    local b = CreateFrame("Button", "WoWPaintMinimapButton", Minimap)
+    self.minimapBtn = b
+    b:SetSize(31, 31)
+    b:SetFrameStrata("MEDIUM")
+    b:SetFrameLevel(Minimap:GetFrameLevel() + 8)
+    b:RegisterForClicks("LeftButtonUp", "RightButtonUp")
+    b:RegisterForDrag("LeftButton")
+    b:SetMovable(true)
+
+    -- The icon is four quads of the addon's own palette rather than an art
+    -- path: it reads as pixel art at this size, and it cannot break when
+    -- Blizzard moves an icon file.
+    for i, colorIndex in ipairs({ 5, 8, 10, 13 }) do
+        local t = b:CreateTexture(nil, "ARTWORK")
+        local col = Canvas.PALETTE[colorIndex]
+        t:SetColorTexture(col[1], col[2], col[3])
+        t:SetSize(8, 8)
+        t:SetPoint("TOPLEFT", b, "TOPLEFT",
+            7 + ((i - 1) % 2) * 8, -6 - math.floor((i - 1) / 2) * 8)
+    end
+
+    local border = b:CreateTexture(nil, "OVERLAY")
+    border:SetTexture("Interface\\Minimap\\MiniMap-TrackingBorder")
+    border:SetSize(53, 53)
+    border:SetPoint("TOPLEFT", b, "TOPLEFT", 0, 0)
+    b:SetHighlightTexture("Interface\\Minimap\\UI-Minimap-ZoomButton-Highlight")
+
+    b:SetScript("OnDragStart", function(self)
+        self:SetScript("OnUpdate", DragUpdate)
+        GameTooltip:Hide()
+    end)
+    b:SetScript("OnDragStop", function(self)
+        self:SetScript("OnUpdate", nil)
+    end)
+    b:SetScript("OnClick", function(_, button)
+        UI:EnsureFrame()
+        if button == "RightButton" then
+            UI:TogglePicker()
+        else
+            UI:Toggle()
+        end
+    end)
+    b:SetScript("OnEnter", function(self)
+        local p = Portraits.Active()
+        GameTooltip:SetOwner(self, "ANCHOR_LEFT")
+        GameTooltip:AddLine("WoWPaint")
+        if p then
+            local sub
+            if p.dist == "MEMBERS" then
+                local n = #(p.members or {})
+                sub = ("%d member%s"):format(n, n == 1 and "" or "s")
+            else
+                sub = "shared, " .. (CHANNEL_LABELS[p.dist] or p.dist)
+            end
+            GameTooltip:AddLine(("Painting '%s' (%s)%s"):format(p.name, sub,
+                p.locked and "  |cffffcc00locked|r" or ""), 1, 1, 1, true)
+        end
+        GameTooltip:AddLine("Left-click: open the canvas", 0.6, 0.6, 0.6)
+        GameTooltip:AddLine("Right-click: portraits, gallery, canvas", 0.6, 0.6, 0.6)
+        GameTooltip:AddLine("Drag: move around the minimap", 0.6, 0.6, 0.6)
+        GameTooltip:Show()
+    end)
+    b:SetScript("OnLeave", function()
+        GameTooltip:Hide()
+    end)
+
+    self:PositionMinimapButton()
+    b:SetShown(not WP.db.minimap.hide)
+end
+
+function UI:ToggleMinimapButton()
+    WP.db.minimap.hide = not WP.db.minimap.hide
+    if self.minimapBtn then
+        self.minimapBtn:SetShown(not WP.db.minimap.hide)
+    end
+    WP.Print(WP.db.minimap.hide
+        and "Minimap button hidden - /wowpaint minimap brings it back."
+        or "Minimap button shown.")
 end

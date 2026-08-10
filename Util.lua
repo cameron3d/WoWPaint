@@ -1,6 +1,6 @@
 local ADDON_NAME, WP = ...
 
-WP.VERSION = "0.4.0"
+WP.VERSION = "0.4.1"
 
 -- 64-character alphabet used for compact wire encoding. Every character is
 -- safe inside an addon message payload (printable ASCII, no "|", no ":",

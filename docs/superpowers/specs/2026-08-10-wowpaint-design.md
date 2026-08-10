@@ -296,3 +296,21 @@ exclusive), **Gallery** on the right. All are `UISpecialFrames` (Escape closes).
 
 Redo, per-pixel author attribution, freehand strokes, a leave protocol (deleting a portrait
 is still a local act), and any lock stronger than a convention between unmodified clients.
+
+## v0.4.1 — Minimap launcher (user-requested)
+
+A minimap button, hand-rolled (no LibDBIcon — the addon still ships as one folder):
+
+- **Left-click** opens the canvas, **right-click** opens the Portraits panel, **drag** moves it
+  around the ring. Angle and hidden state persist in `db.minimap`; `/wowpaint minimap` toggles
+  visibility. The tooltip names the active portrait, its member count or scope, and its lock.
+- The icon is four quads of the addon's own palette rather than an `Interface\ICONS\…` path:
+  it reads as pixel art at 16px and cannot break when Blizzard moves an icon file.
+- Creating the button costs nothing at load — it does not build the canvas frame, so the
+  one-time 4096-texture hitch still waits for an actual click.
+
+To be the launcher the request asked for, the **Portraits panel became a floating sibling** of
+the canvas window instead of its child: it anchors beside the canvas when that is open and
+centre-screen when it is not, and it gained **Open the canvas** and **Gallery** buttons. Picking
+a portrait raises the canvas window. It sits at HIGH strata — above the canvas, below the
+StaticPopups it opens.

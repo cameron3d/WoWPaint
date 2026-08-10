@@ -13,6 +13,9 @@ realm you can whisper, **lock** finished pieces, and keep copies in your persona
 
 ## Paint
 
+- The **minimap button** is the front door: **left-click** opens the canvas, **right-click**
+  opens the Portraits panel — pick a canvas to paint, browse the **Gallery**, or start a
+  **New portrait**. Drag it around the minimap ring; `/wowpaint minimap` hides or shows it.
 - `/wowpaint` (or `/wpaint`) — toggle the canvas window.
 - **Left-click / drag** paints with the selected color; **right-click / drag** erases — with
   every tool, so right-dragging a box erases a box.
@@ -56,8 +59,9 @@ Party, Guild.
   anyone you can whisper works. Around 6 simultaneous painters stays smooth; bigger rosters
   get laggier strokes, never disconnects.
 - **Portrait:** opens the picker — every canvas you have, with member counts and lock state;
-  **Paint** switches to one, **Remove** drops your copy (`/wowpaint portraits`, or
-  `open <name>` / `list` / `delete <name>` from chat).
+  **Paint** switches to one, **Remove** drops your copy (`/wowpaint portraits`, the minimap
+  button's right-click, or `open <name>` / `list` / `delete <name>` from chat). The panel
+  floats free of the canvas window, so it works as a launcher with the canvas closed.
 - **Members: N** opens the roster (hover it for a quick list). The creator gets an
   **Uninvite** button beside every other member; `/wowpaint uninvite Thrall` does the same.
   Uninviting deletes that player's copy and they can no longer paint it — only the creator

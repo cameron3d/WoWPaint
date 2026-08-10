@@ -144,6 +144,13 @@ local function InitDB()
     if type(db.tool) ~= "string" then
         db.tool = nil
     end
+    if type(db.minimap) ~= "table" then
+        db.minimap = {}
+    end
+    if type(db.minimap.angle) ~= "number" then
+        db.minimap.angle = 200
+    end
+    db.minimap.hide = db.minimap.hide == true
     WP.db = db
 end
 
@@ -157,6 +164,9 @@ events:SetScript("OnEvent", function(_, event, ...)
         if name == ADDON_NAME then
             InitDB()
             WP.Comm:Init()
+            -- Cheap: the button does not build the canvas frame, so the
+            -- 4096-texture hitch still waits for a real click.
+            WP.UI:EnsureMinimapButton()
         end
     elseif event == "PLAYER_ENTERING_WORLD" then
         local isLogin, isReload = ...
@@ -258,8 +268,9 @@ SlashCmdList["WOWPAINT"] = function(input)
         WP.UI:ToggleMembers()
     elseif cmd == "portraits" then
         WP.UI:EnsureFrame()
-        WP.UI.frame:Show()
         WP.UI:TogglePicker()
+    elseif cmd == "minimap" then
+        WP.UI:ToggleMinimapButton()
     elseif cmd == "save" then
         WP.UI:EnsureFrame()
         if rest ~= "" then
@@ -304,6 +315,7 @@ SlashCmdList["WOWPAINT"] = function(input)
         WP.Print("  /wowpaint invite [player] - invite someone to the active portrait")
         WP.Print("  /wowpaint open <name> | list | delete <name> - manage portraits")
         WP.Print("  /wowpaint portraits | members - open the picker / roster panels")
+        WP.Print("  /wowpaint minimap - show or hide the minimap button")
         WP.Print("  /wowpaint uninvite [player] - remove a member (creator only)")
         WP.Print("  /wowpaint lock | unlock - freeze the active portrait (creator only)")
         WP.Print("  /wowpaint save [name] | gallery - snapshot to / browse your gallery")
