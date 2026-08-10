@@ -69,6 +69,7 @@ WoWPaint/
 | O | `O:<rev>` | whisper | snapshot offer |
 | G | `G` | whisper | accept offer, start streaming |
 | S | `S:<i>:<n>:<rev>:<data>` | whisper | snapshot chunk i of n |
+| R | `R` | whisper | snapshot request declined (source-side throttle); requester aborts its wait immediately |
 
 Sync flow: joiner broadcasts `H`. Peers with a higher rev whisper `O` after a random 0.5–2.5 s
 delay; peers with a *lower* rev whisper `Q` (which makes the joiner offer back to them, and never

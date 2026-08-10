@@ -31,6 +31,7 @@ Comm.pendingOps = {}          -- locally painted ops awaiting broadcast
 Comm.bufferedEvents = {}      -- ordered B/C events deferred while syncing
 Comm.lastOfferAt = {}
 Comm.lastSnapAt = {}
+Comm.lastRejectAt = {}
 Comm.sync = nil               -- active inbound snapshot transfer
 Comm.offerWindow = nil        -- open offer-collection window
 
@@ -128,13 +129,14 @@ function Comm:FlushPaintOps()
     end
     local ops = table.concat(self.pendingOps)
     self.pendingOps = {}
-    WP.db.rev = WP.db.rev + 1
     self:Broadcast("B" .. ops)
     if self.sync then
-        -- The snapshot in flight predates these strokes; re-apply them on
-        -- top of it once it lands. rev was already counted at flush time,
-        -- so the replay must not count it again.
+        -- The snapshot in flight predates these strokes; defer both the
+        -- replay AND the rev count to ReplayBuffered so our counter ends
+        -- aligned with peers, who count this batch when it arrives.
         self.bufferedEvents[#self.bufferedEvents + 1] = { ops = ops, own = true }
+    else
+        WP.db.rev = WP.db.rev + 1
     end
     WP.UI:UpdateStatus()
 end
@@ -158,14 +160,51 @@ function Comm:SendClear()
     if not WP.db then
         return
     end
+    -- A local clear supersedes any snapshot in flight and everything
+    -- deferred behind it; abandon the transfer so it cannot resurrect the
+    -- canvas when it lands. Stray late chunks are ignored once sync is nil.
+    if self.sync then
+        self.sync = nil
+        self.bufferedEvents = {}
+    end
     -- Unflushed strokes predate the clear; broadcasting them afterward
-    -- would resurrect them on peers only.
+    -- would resurrect them on peers only. (Batches already in the send
+    -- queue are fine: FIFO order delivers them before this C.)
     self.pendingOps = {}
     Canvas.Clear(WP.db.cells)
     WP.db.rev = WP.db.rev + 1
     WP.UI:RedrawAll()
     self:Broadcast("C")
     WP.UI:UpdateStatus()
+end
+
+-- A remote clear supersedes our paint batches still waiting in the send
+-- queue; peers have already cleared, so delivering them later would
+-- resurrect strokes everywhere except here. Un-count each dropped batch
+-- exactly once: batches flushed outside a sync were counted at flush time
+-- (decrement), batches flushed mid-sync are uncounted until replay (remove
+-- their deferred entry instead).
+function Comm:DropQueuedPaints()
+    local queue = self.queue
+    for i = #queue, 1, -1 do
+        local item = queue[i]
+        if item.chatType ~= "WHISPER" and item.msg:sub(1, 1) == "B" then
+            table.remove(queue, i)
+            local ops = item.msg:sub(2)
+            local deferred = false
+            for j = #self.bufferedEvents, 1, -1 do
+                local ev = self.bufferedEvents[j]
+                if ev.own and ev.ops == ops then
+                    table.remove(self.bufferedEvents, j)
+                    deferred = true
+                    break
+                end
+            end
+            if not deferred and WP.db.rev > 0 then
+                WP.db.rev = WP.db.rev - 1
+            end
+        end
+    end
 end
 
 ----------------------------------------------------------------------
@@ -273,16 +312,21 @@ function Comm:WatchSync()
     end)
 end
 
-function Comm:AbortSync()
+-- Tear down an inbound transfer that will not complete. Flushing first
+-- matters: unflushed strokes painted after a buffered clear must land in
+-- bufferedEvents AFTER that clear, or the replayed clear would wipe them
+-- here while peers keep them.
+function Comm:AbortSync(message)
+    self:FlushPaintOps()
     self.sync = nil
     self:ReplayBuffered()
-    WP.Print("Canvas sync timed out.")
+    WP.Print(message or "Canvas sync timed out.")
     WP.UI:UpdateStatus()
 end
 
 -- Apply B/C events that arrived while a snapshot was in flight, in their
--- original order. Remote events still owe a rev bump; our own flushed
--- batches (own = true) were counted when they were sent.
+-- original order. Every replayed event counts one rev, mirroring what
+-- every peer counted when the same event reached them.
 function Comm:ReplayBuffered()
     local events = self.bufferedEvents
     self.bufferedEvents = {}
@@ -290,13 +334,10 @@ function Comm:ReplayBuffered()
         if ev.clear then
             Canvas.Clear(WP.db.cells)
             WP.UI:RedrawAll()
-            WP.db.rev = WP.db.rev + 1
         elseif ev.ops then
             self:ApplyOps(ev.ops)
-            if not ev.own then
-                WP.db.rev = WP.db.rev + 1
-            end
         end
+        WP.db.rev = WP.db.rev + 1
     end
 end
 
@@ -304,6 +345,14 @@ function Comm:OnGet(sender)
     local now = GetTime()
     local last = self.lastSnapAt[sender]
     if last and now - last < SNAP_MIN_INTERVAL then
+        -- Decline explicitly: a requester that committed to us after an
+        -- earlier failed attempt would otherwise wait out its full
+        -- first-chunk timeout on a stream that is never coming.
+        local lastR = self.lastRejectAt[sender]
+        if not lastR or now - lastR > 5 then
+            self.lastRejectAt[sender] = now
+            self:Whisper("R", sender)
+        end
         return
     end
     self.lastSnapAt[sender] = now
@@ -342,6 +391,10 @@ end
 
 function Comm:FinishSync()
     local s = self.sync
+    -- Flush the unflushed stroke tail while sync is still set: it gets
+    -- broadcast now and deferred into bufferedEvents, so the snapshot
+    -- overwrite below cannot erase strokes that peers are about to apply.
+    self:FlushPaintOps()
     self.sync = nil
     local cells = Canvas.Deserialize(table.concat(s.chunks))
     if cells then
@@ -351,6 +404,8 @@ function Comm:FinishSync()
         WP.db.rev = math.max(WP.db.rev, s.rev)
         WP.UI:RedrawAll()
         WP.Print("Canvas synced from " .. Ambiguate(s.source, "short") .. ".")
+    else
+        WP.Print("Canvas sync failed (corrupt snapshot data); use /wowpaint sync to retry.")
     end
     -- Batches that arrived mid-transfer may or may not already be in the
     -- snapshot; pixel ops are idempotent, so replaying them is safe.
@@ -394,6 +449,7 @@ function Comm:OnMessage(prefix, text, channel, sender)
         WP.db.rev = WP.db.rev + 1
         WP.UI:UpdateStatus()
     elseif kind == "C" then
+        self:DropQueuedPaints()
         self.pendingOps = {}
         if self.sync then
             -- Defer alongside batches so the snapshot in flight cannot
@@ -425,5 +481,13 @@ function Comm:OnMessage(prefix, text, channel, sender)
         self:OnGet(sender)
     elseif kind == "S" then
         self:OnSnapshotChunk(text, sender)
+    elseif kind == "R" then
+        -- Our snapshot request was declined (source-side throttle). Only
+        -- honor it from the source we committed to, and only before any
+        -- chunk arrived — a stream in progress is not abandoned for this.
+        local s = self.sync
+        if s and sender == s.source and s.received == 0 then
+            self:AbortSync("Canvas sync declined by source; use /wowpaint sync to retry in a moment.")
+        end
     end
 end
