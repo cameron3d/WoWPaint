@@ -83,20 +83,23 @@ function Comm:GetScopeChannel(mode)
     return nil
 end
 
-function Comm:Enqueue(msg, chatType, target)
-    self.queue[#self.queue + 1] = { msg = msg, chatType = chatType, target = target }
+-- `tag` identifies the logical batch an item belongs to. MEMBERS portraits
+-- enqueue one copy of a batch per roster member, so anything that needs to
+-- reason about batches (rather than messages) matches on the tag.
+function Comm:Enqueue(msg, chatType, target, tag)
+    self.queue[#self.queue + 1] = { msg = msg, chatType = chatType, target = target, tag = tag }
 end
 
 -- Route a message on a portrait's distribution: whisper fan-out to the
 -- roster for MEMBERS portraits, scope broadcast otherwise. Returns false
 -- when nothing could be sent.
-function Comm:Send(p, msg)
+function Comm:Send(p, msg, tag)
     if p.dist == "MEMBERS" then
         local me = WP.PlayerFullName()
         local sent = false
         for _, m in ipairs(p.members or {}) do
             if m ~= me then
-                self:Whisper(msg, m)
+                self:Whisper(msg, m, tag)
                 sent = true
             end
         end
@@ -106,12 +109,12 @@ function Comm:Send(p, msg)
     if not chatType then
         return false
     end
-    self:Enqueue(msg, chatType)
+    self:Enqueue(msg, chatType, nil, tag)
     return true
 end
 
-function Comm:Whisper(msg, target)
-    self:Enqueue(msg, "WHISPER", target)
+function Comm:Whisper(msg, target, tag)
+    self:Enqueue(msg, "WHISPER", target, tag)
 end
 
 function Comm:DrainQueue()
@@ -226,12 +229,14 @@ function Comm:FlushPaintOps()
     if not p then
         return
     end
-    self:Send(p, "B" .. pid .. ops)
+    self.batchSeq = (self.batchSeq or 0) + 1
+    local tag = self.batchSeq
+    self:Send(p, "B" .. pid .. ops, tag)
     if self.sync and self.sync.pid == pid then
         -- The snapshot in flight predates these strokes; defer both the
         -- replay AND the rev count to ReplayBuffered so our counter ends
         -- aligned with peers, who count this batch when it arrives.
-        self.bufferedEvents[#self.bufferedEvents + 1] = { pid = pid, ops = ops, own = true }
+        self.bufferedEvents[#self.bufferedEvents + 1] = { pid = pid, ops = ops, own = true, tag = tag }
     else
         p.rev = p.rev + 1
     end
@@ -290,25 +295,38 @@ end
 -- them later would resurrect strokes everywhere except here. MEMBERS
 -- portraits enqueue one copy per roster member, so un-count once per
 -- unique batch: batches counted at flush time get a decrement, batches
--- deferred mid-sync lose their replay entry instead.
+-- deferred mid-sync lose their replay entry instead. Batches are identified
+-- by their send tag, not their payload: two separate batches can carry byte-
+-- identical ops (paint a cell, erase it, paint it again), and collapsing them
+-- would leave our rev counter above every peer's.
 function Comm:DropQueuedPaints(pid)
     local prefix = "B" .. pid
     local queue = self.queue
-    local dropped = {}
+    local dropped, order = {}, {}
     for i = #queue, 1, -1 do
         local item = queue[i]
         if item.msg:sub(1, 7) == prefix then
-            dropped[item.msg] = true
+            local key = item.tag or item.msg
+            if not dropped[key] then
+                dropped[key] = item
+                order[#order + 1] = key
+            end
             table.remove(queue, i)
         end
     end
     local p = Portraits.Get(pid)
-    for msg in pairs(dropped) do
-        local ops = msg:sub(8)
+    for _, key in ipairs(order) do
+        local item = dropped[key]
         local deferred = false
         for j = #self.bufferedEvents, 1, -1 do
             local ev = self.bufferedEvents[j]
-            if ev.own and ev.pid == pid and ev.ops == ops then
+            local same
+            if item.tag then
+                same = ev.tag == item.tag
+            else
+                same = ev.ops == item.msg:sub(8)
+            end
+            if ev.own and ev.pid == pid and same then
                 table.remove(self.bufferedEvents, j)
                 deferred = true
                 break
@@ -589,10 +607,28 @@ function Comm:SendInvite(p, target)
     if Portraits.IsMember(p, target) then
         return false, Ambiguate(target, "short") .. " is already a member."
     end
+    if Portraits.IsRemoved(p, target) then
+        -- Only the owner can undo their own uninvite; anyone else's re-invite
+        -- would be filtered out by every peer's tombstone anyway.
+        if not Portraits.IsOwner(p, WP.PlayerFullName()) then
+            return false, Ambiguate(target, "short")
+                .. " was uninvited by the creator - only they can bring them back."
+        end
+        Portraits.Unremove(p, target)
+        self:Send(p, "M" .. p.id .. ":+" .. target)
+    end
     if #(p.members or {}) >= Portraits.MAX_MEMBERS then
         return false, "This portrait is at its member limit."
     end
-    self.pendingInvites[p.id .. ";" .. target] = GetTime() + INVITE_TTL
+    local now = GetTime()
+    -- Sweep invites that aged out, so a long session of inviting cannot grow
+    -- the table without bound.
+    for key, expiry in pairs(self.pendingInvites) do
+        if now > expiry then
+            self.pendingInvites[key] = nil
+        end
+    end
+    self.pendingInvites[p.id .. ";" .. target] = now + INVITE_TTL
     self:Whisper("I" .. p.id .. ":" .. (p.owner or "") .. ":" .. p.name, target)
     return true
 end
@@ -624,8 +660,16 @@ function Comm:AcceptInvite(data)
     end
     local p = Portraits.Create(data.name, "MEMBERS", data.id, data.owner)
     -- Roster stub: us, the inviter, and the owner. The full roster arrives
-    -- in the inviter's M message moments later.
-    Portraits.AddMembers(p, { WP.PlayerFullName(), data.from, data.owner })
+    -- in the inviter's M message moments later. Built by appending rather
+    -- than as a literal: a nil in the middle would truncate the ipairs walk
+    -- and leave us with a roster that trusts nobody.
+    local roster = {}
+    for _, name in ipairs({ WP.PlayerFullName() or false, data.from or false, data.owner or false }) do
+        if name then
+            roster[#roster + 1] = name
+        end
+    end
+    Portraits.AddMembers(p, roster)
     self:Whisper("J" .. p.id, data.from)
     Portraits.SetActive(p.id)
     WP.Print("Joined portrait '" .. p.name .. "'. Syncing from " .. Ambiguate(data.from, "short") .. "...")
@@ -651,14 +695,25 @@ function Comm:OnJoin(p, sender)
 end
 
 -- Whisper the full roster to every member, chunked under the payload cap.
--- Union-merge semantics make chunk boundaries harmless.
+-- Union-merge semantics make chunk boundaries harmless. Tokens are plain
+-- names to add and "-name" tombstones to remove; only the owner's tombstones
+-- are honored, so only the owner spends bytes on them.
 function Comm:SendRoster(p)
     if p.dist ~= "MEMBERS" or not p.members then
         return
     end
+    local tokens = {}
+    for _, m in ipairs(p.members) do
+        tokens[#tokens + 1] = m
+    end
+    if Portraits.IsOwner(p, WP.PlayerFullName()) then
+        for _, m in ipairs(p.removed or {}) do
+            tokens[#tokens + 1] = "-" .. m
+        end
+    end
     local base = "M" .. p.id .. ":"
     local cur, curLen = {}, #base
-    for _, m in ipairs(p.members) do
+    for _, m in ipairs(tokens) do
         local addLen = #m + (#cur > 0 and 1 or 0)
         if curLen + addLen > 235 and #cur > 0 then
             self:Send(p, base .. table.concat(cur, ","))
@@ -673,16 +728,97 @@ function Comm:SendRoster(p)
     end
 end
 
+-- Tokens: "name" adds, "-name" tombstones, "+name" lifts a tombstone. Real
+-- character names never start with either mark, so the grammar is
+-- unambiguous. Removals and revocations are honored from the owner only.
 function Comm:OnRoster(p, rest, sender)
     local csv = rest:match("^:(.*)$")
     if not csv then
         return
     end
-    local names = {}
-    for name in csv:gmatch("[^,]+") do
-        names[#names + 1] = name
+    local fromOwner = Portraits.IsOwner(p, sender)
+    local add, remove = {}, {}
+    local changed = false
+    for token in csv:gmatch("[^,]+") do
+        local mark = token:sub(1, 1)
+        if mark == "-" then
+            if fromOwner then
+                remove[#remove + 1] = token:sub(2)
+            end
+        elseif mark == "+" then
+            if fromOwner then
+                local name = token:sub(2)
+                if Portraits.Unremove(p, name) then
+                    changed = true
+                end
+                add[#add + 1] = name
+            end
+        else
+            add[#add + 1] = token
+        end
     end
-    if Portraits.AddMembers(p, names) then
+    -- Adds first, then removals: a message carrying both marks for one name
+    -- must leave that name off the roster.
+    if Portraits.AddMembers(p, add) then
+        changed = true
+    end
+    if #remove > 0 then
+        local me = WP.PlayerFullName()
+        for _, name in ipairs(remove) do
+            if name == me then
+                return self:OnKick(p, sender)
+            end
+        end
+        if Portraits.RemoveMembers(p, remove) then
+            changed = true
+        end
+    end
+    if changed then
+        WP.UI:UpdateAll()
+    end
+end
+
+----------------------------------------------------------------------
+-- Uninvite (owner only)
+----------------------------------------------------------------------
+
+function Comm:SendKick(p, name)
+    if p.dist ~= "MEMBERS" then
+        return false, "The Shared canvas has no roster to remove anyone from."
+    end
+    if not Portraits.IsOwner(p, WP.PlayerFullName()) then
+        return false, "Only the portrait's creator can uninvite members."
+    end
+    name = WP.NormalizeName(name)
+    if not name then
+        return false, "No player name given."
+    end
+    if Portraits.IsOwner(p, name) then
+        return false, "The creator cannot be uninvited."
+    end
+    if not Portraits.IsMember(p, name) then
+        return false, Ambiguate(name, "short") .. " is not a member of '" .. p.name .. "'."
+    end
+    -- Tell them before dropping them: once they are off the roster, Send no
+    -- longer routes anything their way.
+    self:Whisper("K" .. p.id, name)
+    self.pendingInvites[p.id .. ";" .. name] = nil
+    Portraits.RemoveMembers(p, { name })
+    self:SendRoster(p)
+    WP.UI:UpdateAll()
+    return true
+end
+
+-- We were uninvited: the portrait is no longer ours to paint, so drop the
+-- local copy. Anything still whispered at us for that id is ignored from
+-- here on (unknown portrait).
+function Comm:OnKick(p, sender)
+    if not Portraits.IsOwner(p, sender) then
+        return
+    end
+    local name = p.name
+    if Portraits.Delete(p.id) then
+        WP.Print("You were removed from portrait '" .. name .. "' by its creator.")
         WP.UI:UpdateAll()
     end
 end
@@ -707,11 +843,13 @@ function Comm:SendLockState(p, locked)
     WP.UI:UpdateAll()
 end
 
+-- Lock state is the owner's alone, in both directions. An earlier design let
+-- any member relay a lock so stale painters converged without the owner
+-- online; that also let a straggler who missed an unlock drag the owner back
+-- into it, and it handed every member a freeze button. Members that are
+-- locked simply drop inbound paints now, so a straggler diverges from nobody.
 function Comm:OnLock(p, sender)
-    -- Owner locks authoritatively; any roster member may relay a lock
-    -- (that keeps stale painters convergent without the owner online).
-    -- Relay is lock-direction only: unlock stays owner-only.
-    if not Portraits.Lockable(p) then
+    if not Portraits.Lockable(p) or not Portraits.IsOwner(p, sender) then
         return
     end
     if not p.locked then
@@ -735,9 +873,12 @@ function Comm:OnUnlock(p, sender)
 end
 
 -- A paint/clear arrived for a locked portrait: the sender evidently missed
--- the lock. Drop the ops and (throttled) tell them it's locked so they
--- stop diverging.
+-- the lock. The ops are dropped either way; only the owner can usefully say
+-- so, since only the owner's L is honored.
 function Comm:NagLocked(p, sender)
+    if not Portraits.IsOwner(p, WP.PlayerFullName()) then
+        return
+    end
     local now = GetTime()
     local key = p.id .. ";" .. sender
     local last = self.lastLockNagAt[key]
@@ -800,7 +941,7 @@ function Comm:OnMessage(prefix, text, channel, sender)
             return
         end
     else
-        if kind == "M" or kind == "L" or kind == "U" then
+        if kind == "M" or kind == "L" or kind == "U" or kind == "K" then
             return
         end
         if kind == "B" or kind == "C" or kind == "H" then
@@ -893,5 +1034,7 @@ function Comm:OnMessage(prefix, text, channel, sender)
         self:OnLock(p, sender)
     elseif kind == "U" then
         self:OnUnlock(p, sender)
+    elseif kind == "K" then
+        self:OnKick(p, sender)
     end
 end

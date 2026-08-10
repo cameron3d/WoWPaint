@@ -9,14 +9,17 @@ WP.UI = UI
 local CELL = 8                      -- on-screen pixels per canvas cell
 local GRID = Canvas.SIZE * CELL     -- 512
 local FRAME_W = GRID + 28
--- Canvas bottom edge sits 586px from the frame top; two 22px button rows
+-- Canvas bottom edge sits 608px from the frame top; two 22px button rows
 -- (y=14 and y=42) plus breathing room need ~74px below it.
-local FRAME_H = 660
+local FRAME_H = 682
 
 local SWATCH = 24
 local SWATCH_GAP = 8
 
 local GALLERY_ROWS = 8
+local PICKER_ROWS = 6
+local MEMBER_ROWS = 8
+local MAX_UNDO = 20
 
 local CHANNEL_LABELS = {
     AUTO = "Auto",
@@ -27,9 +30,29 @@ local CHANNEL_LABELS = {
 }
 local CHANNEL_ORDER = { "AUTO", "GUILD", "PARTY", "RAID" }
 
+-- Right mouse button always means "erase", so every tool has a subtractive
+-- twin without doubling the button count.
+local TOOLS = {
+    { id = "PENCIL", label = "Pencil", tip = "Freehand. Drag to draw; right-drag erases." },
+    { id = "LINE",   label = "Line",   tip = "Drag for a straight line." },
+    { id = "RECT",   label = "Box",    tip = "Drag for a rectangle. Hold Shift to fill it." },
+    { id = "CIRCLE", label = "Circle", tip = "Drag for an ellipse. Hold Shift to fill it." },
+    { id = "FILL",   label = "Fill",   tip = "Flood-fill the matching area under the cursor." },
+    { id = "PICK",   label = "Pick",   tip = "Pick up the colour under the cursor." },
+}
+local TOOL_BY_ID = {}
+for _, t in ipairs(TOOLS) do
+    TOOL_BY_ID[t.id] = t
+end
+
 UI.selectedColor = 3 -- black
+UI.tool = "PENCIL"
+UI.brushSize = 1
 UI.galleryView = nil -- gallery entry being viewed read-only, or nil
 UI.galleryPage = 1
+UI.pickerPage = 1
+UI.memberPage = 1
+UI.undoStack = {}
 
 ----------------------------------------------------------------------
 -- Static popups
@@ -113,6 +136,19 @@ StaticPopupDialogs["WOWPAINT_INVITE_RECV"] = {
     preferredIndex = 3,
 }
 
+StaticPopupDialogs["WOWPAINT_UNINVITE"] = {
+    text = "Remove %s from this portrait? Their copy is deleted and they can no longer paint it.",
+    button1 = YES,
+    button2 = NO,
+    OnAccept = function(self, data)
+        UI:DoUninvite(data.name)
+    end,
+    timeout = 0,
+    whileDead = true,
+    hideOnEscape = true,
+    preferredIndex = 3,
+}
+
 StaticPopupDialogs["WOWPAINT_SAVE"] = {
     text = "Save to gallery as:",
     button1 = ACCEPT,
@@ -179,6 +215,10 @@ function UI:EnsureFrame()
         return
     end
 
+    self.tool = TOOL_BY_ID[WP.db.tool] and WP.db.tool or "PENCIL"
+    self.brushSize = WP.db.brushSize or 1
+    self.selectedColor = WP.db.color or self.selectedColor
+
     local f = CreateFrame("Frame", "WoWPaintFrame", UIParent, "BackdropTemplate")
     self.frame = f
     -- CreateFrame returns a shown frame; start hidden so Toggle's first
@@ -219,10 +259,13 @@ function UI:EnsureFrame()
     local close = CreateFrame("Button", nil, f, "UIPanelCloseButton")
     close:SetPoint("TOPRIGHT", f, "TOPRIGHT", -6, -6)
 
+    self:BuildToolbar(f)
     self:BuildPalette(f)
     self:BuildCanvas(f)
     self:BuildBottomBars(f)
     self:BuildGalleryPanel(f)
+    self:BuildPickerPanel(f)
+    self:BuildMembersPanel(f)
 
     tinsert(UISpecialFrames, "WoWPaintFrame")
 
@@ -232,11 +275,89 @@ function UI:EnsureFrame()
     end)
 end
 
+local function Tooltip(frame, title, body)
+    frame:SetScript("OnEnter", function(self)
+        GameTooltip:SetOwner(self, "ANCHOR_TOP")
+        GameTooltip:AddLine(title)
+        if body then
+            GameTooltip:AddLine(body, 1, 1, 1, true)
+        end
+        GameTooltip:Show()
+    end)
+    frame:SetScript("OnLeave", function()
+        GameTooltip:Hide()
+    end)
+end
+
+function UI:BuildToolbar(f)
+    local bar = CreateFrame("Frame", nil, f)
+    bar:SetSize(506, 22)
+    bar:SetPoint("TOP", f, "TOP", 0, -38)
+
+    local x = 0
+    self.toolBtns = {}
+    for _, tool in ipairs(TOOLS) do
+        local b = CreateFrame("Button", nil, bar, "UIPanelButtonTemplate")
+        b:SetSize(54, 22)
+        b:SetPoint("LEFT", bar, "LEFT", x, 0)
+        b:SetText(tool.label)
+        b:SetScript("OnClick", function()
+            UI:SetTool(tool.id)
+        end)
+        Tooltip(b, tool.label, tool.tip)
+        self.toolBtns[tool.id] = b
+        x = x + 58
+    end
+
+    x = x + 4
+    self.sizeBtn = CreateFrame("Button", nil, bar, "UIPanelButtonTemplate")
+    self.sizeBtn:SetSize(46, 22)
+    self.sizeBtn:SetPoint("LEFT", bar, "LEFT", x, 0)
+    self.sizeBtn:SetScript("OnClick", function()
+        UI.brushSize = UI.brushSize % 3 + 1
+        WP.db.brushSize = UI.brushSize
+        UI:UpdateButtons()
+    end)
+    Tooltip(self.sizeBtn, "Brush size", "Freehand nib width, 1 to 3 cells.")
+    x = x + 50
+
+    self.undoBtn = CreateFrame("Button", nil, bar, "UIPanelButtonTemplate")
+    self.undoBtn:SetSize(54, 22)
+    self.undoBtn:SetPoint("LEFT", bar, "LEFT", x, 0)
+    self.undoBtn:SetText("Undo")
+    self.undoBtn:SetScript("OnClick", function()
+        UI:Undo()
+    end)
+    Tooltip(self.undoBtn, "Undo", "Repaints what your last action covered. Peers see the repaint like any other strokes.")
+    x = x + 58
+
+    self.gridBtn = CreateFrame("Button", nil, bar, "UIPanelButtonTemplate")
+    self.gridBtn:SetSize(46, 22)
+    self.gridBtn:SetPoint("LEFT", bar, "LEFT", x, 0)
+    self.gridBtn:SetText("Grid")
+    self.gridBtn:SetScript("OnClick", function()
+        WP.db.showGrid = not WP.db.showGrid
+        UI:UpdateGrid()
+        UI:UpdateButtons()
+    end)
+    Tooltip(self.gridBtn, "Grid", "Overlay cell guides. Local only.")
+end
+
+function UI:SetTool(id)
+    if not TOOL_BY_ID[id] then
+        return
+    end
+    self:ClearPreview()
+    self.tool = id
+    WP.db.tool = id
+    self:UpdateButtons()
+end
+
 function UI:BuildPalette(f)
     local bar = CreateFrame("Frame", nil, f)
     local barWidth = Canvas.NUM_COLORS * SWATCH + (Canvas.NUM_COLORS - 1) * SWATCH_GAP
     bar:SetSize(barWidth, SWATCH)
-    bar:SetPoint("TOP", f, "TOP", 0, -40)
+    bar:SetPoint("TOP", f, "TOP", 0, -66)
 
     self.rings = {}
     for c = 0, Canvas.NUM_COLORS - 1 do
@@ -270,6 +391,9 @@ end
 
 function UI:SelectColor(c)
     self.selectedColor = c
+    if WP.db then
+        WP.db.color = c
+    end
     for i, ring in pairs(self.rings) do
         ring:SetShown(i == c)
     end
@@ -279,7 +403,7 @@ function UI:BuildCanvas(f)
     local canvas = CreateFrame("Frame", nil, f)
     self.canvas = canvas
     canvas:SetSize(GRID, GRID)
-    canvas:SetPoint("TOP", f, "TOP", 0, -74)
+    canvas:SetPoint("TOP", f, "TOP", 0, -96)
     canvas:EnableMouse(true)
 
     -- One texture per cell, created once. ~4096 flat color textures batch
@@ -295,38 +419,61 @@ function UI:BuildCanvas(f)
     end
 
     canvas:SetScript("OnMouseDown", function(_, button)
-        if UI.galleryView then
-            return
-        end
         if button == "LeftButton" then
-            UI.paintColor = UI.selectedColor
+            UI:OnCanvasDown(UI.selectedColor)
         elseif button == "RightButton" then
-            UI.paintColor = 0
-        else
-            return
+            UI:OnCanvasDown(0)
         end
-        UI.painting = true
-        UI.lastCell = nil
-        UI:PaintAtCursor()
     end)
     canvas:SetScript("OnMouseUp", function()
-        UI.painting = false
-        UI.lastCell = nil
+        UI:OnCanvasUp()
     end)
     canvas:SetScript("OnUpdate", function()
-        if not UI.painting then
+        if not UI.dragging then
             return
         end
         if IsMouseButtonDown("LeftButton") or IsMouseButtonDown("RightButton") then
-            UI:PaintAtCursor()
+            UI:OnCanvasDrag()
         else
-            UI.painting = false
-            UI.lastCell = nil
+            UI:OnCanvasUp()
         end
     end)
 end
 
-function UI:CellFromCursor()
+-- Grid guides are built the first time they are switched on: 126 hairline
+-- textures are cheap, but there is no reason to pay for them unasked.
+function UI:UpdateGrid()
+    if not self.canvas then
+        return
+    end
+    local want = WP.db.showGrid and true or false
+    if want and not self.gridTex then
+        self.gridTex = {}
+        for i = 1, Canvas.SIZE - 1 do
+            local v = self.canvas:CreateTexture(nil, "OVERLAY")
+            v:SetColorTexture(0, 0, 0, 0.18)
+            v:SetSize(1, GRID)
+            v:SetPoint("TOPLEFT", self.canvas, "TOPLEFT", i * CELL, 0)
+            local h = self.canvas:CreateTexture(nil, "OVERLAY")
+            h:SetColorTexture(0, 0, 0, 0.18)
+            h:SetSize(GRID, 1)
+            h:SetPoint("TOPLEFT", self.canvas, "TOPLEFT", 0, -i * CELL)
+            self.gridTex[#self.gridTex + 1] = v
+            self.gridTex[#self.gridTex + 1] = h
+        end
+    end
+    for _, t in ipairs(self.gridTex or {}) do
+        t:SetShown(want)
+    end
+end
+
+----------------------------------------------------------------------
+-- Canvas input
+----------------------------------------------------------------------
+
+-- `clamp` keeps a shape drag anchored to the canvas edge when the cursor
+-- wanders off it, which is how every other pixel editor behaves.
+function UI:CellFromCursor(clamp)
     local canvas = self.canvas
     local left, top = canvas:GetLeft(), canvas:GetTop()
     if not left or not top then
@@ -338,26 +485,139 @@ function UI:CellFromCursor()
     local x = math.floor((cx - left) / CELL) + 1
     local y = math.floor((top - cy) / CELL) + 1
     if x < 1 or x > Canvas.SIZE or y < 1 or y > Canvas.SIZE then
-        return nil
+        if not clamp then
+            return nil
+        end
+        x = math.min(Canvas.SIZE, math.max(1, x))
+        y = math.min(Canvas.SIZE, math.max(1, y))
     end
     return x, y
 end
 
-function UI:PaintAtCursor()
-    if self.galleryView then
+-- Every write to the canvas funnels through here so undo sees all of it.
+function UI:Apply(p, x, y, color)
+    if x < 1 or x > Canvas.SIZE or y < 1 or y > Canvas.SIZE then
         return
+    end
+    local i = Canvas.Index(x, y)
+    if p.cells[i] == color then
+        return
+    end
+    if self.undoScratch then
+        self.undoScratch[#self.undoScratch + 1] = { i, p.cells[i] }
+    end
+    WP.Comm:Paint(p, x, y, color)
+end
+
+function UI:ApplyBrush(p, x, y, color)
+    local n = self.brushSize or 1
+    if n <= 1 then
+        return self:Apply(p, x, y, color)
+    end
+    local half = math.floor((n - 1) / 2)
+    for dy = -half, n - 1 - half do
+        for dx = -half, n - 1 - half do
+            self:Apply(p, x + dx, y + dy, color)
+        end
+    end
+end
+
+function UI:ActivePaintable()
+    if self.galleryView then
+        return nil
     end
     local p = Portraits.Active()
     if not p or p.locked then
+        return nil
+    end
+    return p
+end
+
+function UI:OnCanvasDown(color)
+    local p = self:ActivePaintable()
+    if not p then
         return
     end
     local x, y = self:CellFromCursor()
     if not x then
-        -- Cursor left the canvas mid-drag; restart the stroke when it
-        -- returns rather than drawing a line across the gap.
-        self.lastCell = nil
         return
     end
+    self.paintColor = color
+
+    if self.tool == "PICK" then
+        self:SelectColor(p.cells[Canvas.Index(x, y)] or 0)
+        self:SetTool("PENCIL")
+        return
+    end
+
+    if self.tool == "FILL" then
+        -- Collect the region before painting any of it: the fill walk reads
+        -- the same cells the paint would be mutating.
+        local region = {}
+        Canvas.FloodFill(p.cells, x, y, function(fx, fy)
+            region[#region + 1] = { fx, fy }
+        end)
+        self.undoScratch = {}
+        for _, c in ipairs(region) do
+            self:Apply(p, c[1], c[2], color)
+        end
+        self:PushUndo(p)
+        return
+    end
+
+    self.dragging = true
+    self.anchor = { x, y }
+    self.lastCell = nil
+    if self.tool == "PENCIL" then
+        self.undoScratch = {}
+        self:Stroke(p, x, y)
+    end
+end
+
+function UI:OnCanvasDrag()
+    local p = self:ActivePaintable()
+    if not p then
+        return
+    end
+    if self.tool == "PENCIL" then
+        local x, y = self:CellFromCursor()
+        if not x then
+            -- Cursor left the canvas mid-drag; restart the stroke when it
+            -- returns rather than drawing a line across the gap.
+            self.lastCell = nil
+            return
+        end
+        self:Stroke(p, x, y)
+    else
+        local x, y = self:CellFromCursor(true)
+        if x then
+            self:PreviewShape(x, y)
+        end
+    end
+end
+
+function UI:OnCanvasUp()
+    if not self.dragging then
+        return
+    end
+    self.dragging = false
+    local list = self:ClearPreview()
+    local p = self:ActivePaintable()
+    if p and self.tool ~= "PENCIL" then
+        self.undoScratch = {}
+        for _, c in ipairs(list) do
+            self:Apply(p, c[1], c[2], self.paintColor)
+        end
+    end
+    if p then
+        self:PushUndo(p)
+    end
+    self.undoScratch = nil
+    self.lastCell = nil
+    self.anchor = nil
+end
+
+function UI:Stroke(p, x, y)
     local last = self.lastCell
     if last then
         if last[1] == x and last[2] == y then
@@ -366,13 +626,116 @@ function UI:PaintAtCursor()
         -- Fill in cells a fast drag skipped between two OnUpdate samples.
         local color = self.paintColor
         WP.ForLine(last[1], last[2], x, y, function(px, py)
-            WP.Comm:Paint(p, px, py, color)
+            UI:ApplyBrush(p, px, py, color)
         end)
     else
-        WP.Comm:Paint(p, x, y, self.paintColor)
+        self:ApplyBrush(p, x, y, self.paintColor)
     end
     self.lastCell = { x, y }
 end
+
+function UI:ShapeCells(x, y)
+    local list = {}
+    local a = self.anchor
+    if not a then
+        return list
+    end
+    local filled = IsShiftKeyDown()
+    local function add(px, py)
+        list[#list + 1] = { px, py }
+    end
+    if self.tool == "LINE" then
+        WP.ForLine(a[1], a[2], x, y, add)
+    elseif self.tool == "RECT" then
+        WP.ForRect(a[1], a[2], x, y, filled, add)
+    elseif self.tool == "CIRCLE" then
+        WP.ForEllipse(a[1], a[2], x, y, filled, add)
+    end
+    return list
+end
+
+-- Shapes are drawn straight onto the cell textures while dragging and only
+-- committed on release, so an in-progress box costs no wire traffic.
+function UI:PreviewShape(x, y)
+    self:ClearPreview()
+    local list = self:ShapeCells(x, y)
+    self.previewList = list
+    local col = Canvas.PALETTE[self.paintColor] or Canvas.PALETTE[0]
+    for _, c in ipairs(list) do
+        self.cellTex[Canvas.Index(c[1], c[2])]:SetColorTexture(col[1], col[2], col[3])
+    end
+end
+
+function UI:ClearPreview()
+    local list = self.previewList
+    self.previewList = nil
+    if not list then
+        return {}
+    end
+    local cells = self:CurrentCells()
+    if cells and self.cellTex then
+        for _, c in ipairs(list) do
+            local i = Canvas.Index(c[1], c[2])
+            local col = Canvas.PALETTE[cells[i]] or Canvas.PALETTE[0]
+            self.cellTex[i]:SetColorTexture(col[1], col[2], col[3])
+        end
+    end
+    return list
+end
+
+----------------------------------------------------------------------
+-- Undo (local, and broadcast like any other paint)
+----------------------------------------------------------------------
+
+function UI:PushUndo(p)
+    local scratch = self.undoScratch
+    self.undoScratch = nil
+    if not scratch or #scratch == 0 then
+        return
+    end
+    self.undoStack[#self.undoStack + 1] = { pid = p.id, cells = scratch }
+    while #self.undoStack > MAX_UNDO do
+        table.remove(self.undoStack, 1)
+    end
+    self:UpdateButtons()
+end
+
+function UI:UndoIndex()
+    local p = Portraits.Active()
+    if not p then
+        return nil
+    end
+    for i = #self.undoStack, 1, -1 do
+        if self.undoStack[i].pid == p.id then
+            return i
+        end
+    end
+    return nil
+end
+
+function UI:Undo()
+    local p = self:ActivePaintable()
+    if not p then
+        return
+    end
+    local idx = self:UndoIndex()
+    if not idx then
+        WP.Print("Nothing to undo on '" .. p.name .. "'.")
+        return
+    end
+    local entry = table.remove(self.undoStack, idx)
+    -- Newest change first: a cell touched twice in one action must land back
+    -- on the colour it had before the action started.
+    for i = #entry.cells, 1, -1 do
+        local x, y = Canvas.Coords(entry.cells[i][1])
+        WP.Comm:Paint(p, x, y, entry.cells[i][2])
+    end
+    self:UpdateButtons()
+end
+
+----------------------------------------------------------------------
+-- Bottom bars
+----------------------------------------------------------------------
 
 function UI:BuildBottomBars(f)
     -- Row 1 (y=14): scope/members, status, clear
@@ -382,6 +745,31 @@ function UI:BuildBottomBars(f)
     scopeBtn:SetPoint("BOTTOMLEFT", f, "BOTTOMLEFT", 14, 14)
     scopeBtn:SetScript("OnClick", function()
         UI:OnScopeClick()
+    end)
+    scopeBtn:SetScript("OnEnter", function(self)
+        local p = Portraits.Active()
+        if not p then
+            return
+        end
+        GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+        if p.dist ~= "MEMBERS" then
+            GameTooltip:AddLine("Shared canvas scope")
+            GameTooltip:AddLine("Click to cycle Auto / Guild / Party / Raid.", 1, 1, 1, true)
+        else
+            GameTooltip:AddLine("Members of '" .. p.name .. "'")
+            for _, m in ipairs(p.members or {}) do
+                local label = Ambiguate(m, "short")
+                if Portraits.IsOwner(p, m) then
+                    label = label .. " |cff9d9d9d(creator)|r"
+                end
+                GameTooltip:AddLine(label, 1, 1, 1)
+            end
+            GameTooltip:AddLine("Click to manage the roster.", 0.6, 0.6, 0.6, true)
+        end
+        GameTooltip:Show()
+    end)
+    scopeBtn:SetScript("OnLeave", function()
+        GameTooltip:Hide()
     end)
 
     local clearBtn = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
@@ -400,7 +788,7 @@ function UI:BuildBottomBars(f)
     self.status = status
     status:SetPoint("BOTTOM", f, "BOTTOM", 0, 19)
 
-    -- Row 2 (y=42): portrait cycle, new, invite, lock, save, gallery
+    -- Row 2 (y=42): portrait picker, new, invite, lock, save, gallery
     local x = 14
     local function rowBtn(width, label, onClick)
         local b = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
@@ -415,8 +803,9 @@ function UI:BuildBottomBars(f)
     end
 
     self.portraitBtn = rowBtn(150, nil, function()
-        UI:CyclePortrait()
+        UI:TogglePicker()
     end)
+    Tooltip(self.portraitBtn, "Portraits", "Pick which canvas you are painting.")
     self.newBtn = rowBtn(50, "New", function()
         StaticPopup_Show("WOWPAINT_NEW")
     end)
@@ -437,15 +826,18 @@ function UI:BuildBottomBars(f)
 end
 
 ----------------------------------------------------------------------
--- Gallery panel
+-- Side panels
 ----------------------------------------------------------------------
 
-function UI:BuildGalleryPanel(f)
-    local g = CreateFrame("Frame", "WoWPaintGalleryFrame", f, "BackdropTemplate")
-    self.gallery = g
+local function BuildPanel(f, globalName, titleText, w, h, side)
+    local g = CreateFrame("Frame", globalName, f, "BackdropTemplate")
     g:Hide()
-    g:SetSize(300, 460)
-    g:SetPoint("TOPLEFT", f, "TOPRIGHT", -8, 0)
+    g:SetSize(w, h)
+    if side == "LEFT" then
+        g:SetPoint("TOPRIGHT", f, "TOPLEFT", 8, 0)
+    else
+        g:SetPoint("TOPLEFT", f, "TOPRIGHT", -8, 0)
+    end
     g:SetBackdrop({
         bgFile = "Interface\\DialogFrame\\UI-DialogBox-Background-Dark",
         edgeFile = "Interface\\DialogFrame\\UI-DialogBox-Border",
@@ -455,12 +847,48 @@ function UI:BuildGalleryPanel(f)
         insets = { left = 11, right = 12, top = 12, bottom = 11 },
     })
 
-    local title = g:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
-    title:SetPoint("TOP", g, "TOP", 0, -16)
-    title:SetText("Gallery")
+    g.title = g:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+    g.title:SetPoint("TOP", g, "TOP", 0, -16)
+    g.title:SetText(titleText)
 
     local close = CreateFrame("Button", nil, g, "UIPanelCloseButton")
     close:SetPoint("TOPRIGHT", g, "TOPRIGHT", -6, -6)
+
+    tinsert(UISpecialFrames, globalName)
+    return g
+end
+
+local function BuildPager(g, onChange)
+    local text = g:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    text:SetPoint("BOTTOM", g, "BOTTOM", 0, 70)
+
+    local prev = CreateFrame("Button", nil, g, "UIPanelButtonTemplate")
+    prev:SetSize(50, 20)
+    prev:SetPoint("BOTTOMLEFT", g, "BOTTOMLEFT", 16, 16)
+    prev:SetText("<")
+    prev:SetScript("OnClick", function()
+        onChange(-1)
+    end)
+
+    local next = CreateFrame("Button", nil, g, "UIPanelButtonTemplate")
+    next:SetSize(50, 20)
+    next:SetPoint("BOTTOMRIGHT", g, "BOTTOMRIGHT", -16, 16)
+    next:SetText(">")
+    next:SetScript("OnClick", function()
+        onChange(1)
+    end)
+    return text
+end
+
+----------------------------------------------------------------------
+-- Gallery panel
+----------------------------------------------------------------------
+
+function UI:BuildGalleryPanel(f)
+    -- Taller than the other panels: 8 rows plus the pager plus the Back
+    -- control, which only appears while an entry is open read-only.
+    local g = BuildPanel(f, "WoWPaintGalleryFrame", "Gallery", 300, 500, "RIGHT")
+    self.gallery = g
 
     g:SetScript("OnHide", function()
         -- Closing the gallery returns the canvas to the live portrait.
@@ -494,28 +922,21 @@ function UI:BuildGalleryPanel(f)
         self.galleryRows[i] = row
     end
 
-    self.galleryPageText = g:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-    self.galleryPageText:SetPoint("BOTTOM", g, "BOTTOM", 0, 20)
-
-    local prev = CreateFrame("Button", nil, g, "UIPanelButtonTemplate")
-    prev:SetSize(50, 20)
-    prev:SetPoint("BOTTOMLEFT", g, "BOTTOMLEFT", 16, 16)
-    prev:SetText("<")
-    prev:SetScript("OnClick", function()
-        UI.galleryPage = math.max(1, UI.galleryPage - 1)
+    self.galleryPageText = BuildPager(g, function(delta)
+        UI.galleryPage = math.max(1, UI.galleryPage + delta)
         UI:RefreshGallery()
     end)
 
-    local next = CreateFrame("Button", nil, g, "UIPanelButtonTemplate")
-    next:SetSize(50, 20)
-    next:SetPoint("BOTTOMRIGHT", g, "BOTTOMRIGHT", -16, 16)
-    next:SetText(">")
-    next:SetScript("OnClick", function()
-        UI.galleryPage = UI.galleryPage + 1
-        UI:RefreshGallery()
+    -- Explicit way out of read-only viewing, without closing the panel.
+    self.galleryBackBtn = CreateFrame("Button", nil, g, "UIPanelButtonTemplate")
+    self.galleryBackBtn:SetSize(120, 22)
+    self.galleryBackBtn:SetPoint("BOTTOM", g, "BOTTOM", 0, 42)
+    self.galleryBackBtn:SetText("Back to painting")
+    self.galleryBackBtn:Hide()
+    self.galleryBackBtn:SetScript("OnClick", function()
+        UI.galleryView = nil
+        UI:UpdateAll()
     end)
-
-    tinsert(UISpecialFrames, "WoWPaintGalleryFrame")
 end
 
 function UI:ToggleGallery()
@@ -558,6 +979,7 @@ function UI:RefreshGallery()
         end
     end
     self.galleryPageText:SetText(("Page %d / %d  -  %d saved"):format(page, pages, #entries))
+    self.galleryBackBtn:SetShown(self.galleryView ~= nil)
 end
 
 function UI:SaveToGallery(name)
@@ -577,6 +999,261 @@ function UI:DeleteGalleryEntry(index)
     Portraits.DeleteGalleryEntry(index)
     self:RefreshGallery()
     self:UpdateAll()
+end
+
+----------------------------------------------------------------------
+-- Portrait picker panel
+----------------------------------------------------------------------
+
+function UI:BuildPickerPanel(f)
+    local g = BuildPanel(f, "WoWPaintPortraitsFrame", "Portraits", 300, 410, "LEFT")
+    self.picker = g
+
+    self.pickerRows = {}
+    for i = 1, PICKER_ROWS do
+        local row = CreateFrame("Button", nil, g)
+        row:SetSize(264, 44)
+        row:SetPoint("TOPLEFT", g, "TOPLEFT", 18, -34 - (i - 1) * 46)
+
+        row.highlight = row:CreateTexture(nil, "BACKGROUND")
+        row.highlight:SetAllPoints(row)
+        row.highlight:SetColorTexture(0.5, 0.65, 0.85, 0.22)
+        row.highlight:Hide()
+
+        row.text = row:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        row.text:SetPoint("TOPLEFT", row, "TOPLEFT", 2, -2)
+        row.text:SetPoint("RIGHT", row, "RIGHT", -2, 0)
+        row.text:SetJustifyH("LEFT")
+
+        row.sub = row:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
+        row.sub:SetPoint("BOTTOMLEFT", row, "BOTTOMLEFT", 2, 5)
+        row.sub:SetJustifyH("LEFT")
+
+        row.openBtn = CreateFrame("Button", nil, row, "UIPanelButtonTemplate")
+        row.openBtn:SetSize(56, 18)
+        row.openBtn:SetPoint("BOTTOMRIGHT", row, "BOTTOMRIGHT", -62, 2)
+        row.openBtn:SetText("Paint")
+
+        row.delBtn = CreateFrame("Button", nil, row, "UIPanelButtonTemplate")
+        row.delBtn:SetSize(56, 18)
+        row.delBtn:SetPoint("LEFT", row.openBtn, "RIGHT", 6, 0)
+        row.delBtn:SetText("Remove")
+
+        self.pickerRows[i] = row
+    end
+
+    self.pickerPageText = BuildPager(g, function(delta)
+        UI.pickerPage = math.max(1, UI.pickerPage + delta)
+        UI:RefreshPicker()
+    end)
+
+    local newBtn = CreateFrame("Button", nil, g, "UIPanelButtonTemplate")
+    newBtn:SetSize(150, 22)
+    newBtn:SetPoint("BOTTOM", g, "BOTTOM", 0, 42)
+    newBtn:SetText("New portrait")
+    newBtn:SetScript("OnClick", function()
+        StaticPopup_Show("WOWPAINT_NEW")
+    end)
+end
+
+function UI:TogglePicker()
+    if self.picker:IsShown() then
+        self.picker:Hide()
+    else
+        self.members:Hide()
+        self.pickerPage = 1
+        self.picker:Show()
+        self:RefreshPicker()
+    end
+end
+
+function UI:RefreshPicker()
+    if not self.picker or not self.picker:IsShown() then
+        return
+    end
+    local list = Portraits.List()
+    local pages = math.max(1, math.ceil(#list / PICKER_ROWS))
+    if self.pickerPage > pages then
+        self.pickerPage = pages
+    end
+    local page = self.pickerPage
+    local activeId = Portraits.Active().id
+    for i = 1, PICKER_ROWS do
+        local row = self.pickerRows[i]
+        local p = list[(page - 1) * PICKER_ROWS + i]
+        if p then
+            row:Show()
+            row.highlight:SetShown(p.id == activeId)
+            row.text:SetText(p.name .. (p.locked and "  |cffffcc00(locked)|r" or ""))
+            if p.dist == "MEMBERS" then
+                local n = #(p.members or {})
+                row.sub:SetText(("%d member%s%s"):format(n, n == 1 and "" or "s",
+                    Portraits.IsOwner(p, WP.PlayerFullName()) and "  -  yours" or ""))
+            else
+                row.sub:SetText("shared - " .. (CHANNEL_LABELS[p.dist] or p.dist))
+            end
+            row.openBtn:SetEnabled(p.id ~= activeId)
+            row.openBtn:SetScript("OnClick", function()
+                UI:OpenPortrait(p.id)
+            end)
+            row.delBtn:SetEnabled(p.id ~= Portraits.SHARED_ID)
+            row.delBtn:SetScript("OnClick", function()
+                StaticPopup_Show("WOWPAINT_DELETE_PORTRAIT", p.name, nil, { id = p.id })
+            end)
+        else
+            row:Hide()
+        end
+    end
+    self.pickerPageText:SetText(("Page %d / %d  -  %d portrait%s"):format(
+        page, pages, #list, #list == 1 and "" or "s"))
+end
+
+function UI:OpenPortrait(id)
+    local p = Portraits.Get(id)
+    if not p or not Portraits.SetActive(id) then
+        return
+    end
+    self.galleryView = nil
+    self:UpdateAll()
+    WP.Comm:SendHello(p, false)
+    WP.Print("Now painting '" .. p.name .. "'.")
+end
+
+----------------------------------------------------------------------
+-- Members panel (uninvite is the creator's alone)
+----------------------------------------------------------------------
+
+function UI:BuildMembersPanel(f)
+    local g = BuildPanel(f, "WoWPaintMembersFrame", "Members", 300, 410, "LEFT")
+    self.members = g
+
+    self.memberRows = {}
+    for i = 1, MEMBER_ROWS do
+        local row = CreateFrame("Frame", nil, g)
+        row:SetSize(264, 26)
+        row:SetPoint("TOPLEFT", g, "TOPLEFT", 18, -40 - (i - 1) * 28)
+
+        row.text = row:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        row.text:SetPoint("LEFT", row, "LEFT", 2, 0)
+        row.text:SetJustifyH("LEFT")
+
+        row.kickBtn = CreateFrame("Button", nil, row, "UIPanelButtonTemplate")
+        row.kickBtn:SetSize(72, 18)
+        row.kickBtn:SetPoint("RIGHT", row, "RIGHT", -2, 0)
+        row.kickBtn:SetText("Uninvite")
+
+        self.memberRows[i] = row
+    end
+
+    self.memberPageText = BuildPager(g, function(delta)
+        UI.memberPage = math.max(1, UI.memberPage + delta)
+        UI:RefreshMembers()
+    end)
+
+    local inviteBtn = CreateFrame("Button", nil, g, "UIPanelButtonTemplate")
+    inviteBtn:SetSize(150, 22)
+    inviteBtn:SetPoint("BOTTOM", g, "BOTTOM", 0, 42)
+    inviteBtn:SetText("Invite a player")
+    inviteBtn:SetScript("OnClick", function()
+        UI:OnInviteClick()
+    end)
+    self.memberInviteBtn = inviteBtn
+end
+
+function UI:ToggleMembers()
+    local p = Portraits.Active()
+    if not p or p.dist ~= "MEMBERS" then
+        WP.Print("The Shared canvas has no roster - everyone in your scope already paints it. Create a portrait to invite people.")
+        return
+    end
+    if self.members:IsShown() then
+        self.members:Hide()
+    else
+        self.picker:Hide()
+        self.memberPage = 1
+        self.members:Show()
+        self:RefreshMembers()
+    end
+end
+
+function UI:RefreshMembers()
+    if not self.members or not self.members:IsShown() then
+        return
+    end
+    local p = Portraits.Active()
+    if not p or p.dist ~= "MEMBERS" then
+        self.members:Hide()
+        return
+    end
+    local roster = p.members or {}
+    local iAmOwner = Portraits.IsOwner(p, WP.PlayerFullName())
+    local pages = math.max(1, math.ceil(#roster / MEMBER_ROWS))
+    if self.memberPage > pages then
+        self.memberPage = pages
+    end
+    local page = self.memberPage
+    self.members.title:SetText("Members of '" .. p.name:sub(1, 18) .. "'")
+    for i = 1, MEMBER_ROWS do
+        local row = self.memberRows[i]
+        local name = roster[(page - 1) * MEMBER_ROWS + i]
+        if name then
+            row:Show()
+            local isOwner = Portraits.IsOwner(p, name)
+            local label = Ambiguate(name, "short")
+            if isOwner then
+                label = label .. "  |cff9d9d9d(creator)|r"
+            elseif name == WP.PlayerFullName() then
+                label = label .. "  |cff9d9d9d(you)|r"
+            end
+            row.text:SetText(label)
+            -- Only the creator may uninvite, and never themselves.
+            row.kickBtn:SetShown(iAmOwner and not isOwner)
+            row.kickBtn:SetScript("OnClick", function()
+                UI:Uninvite(name)
+            end)
+        else
+            row:Hide()
+        end
+    end
+    local removed = #(p.removed or {})
+    self.memberPageText:SetText(("Page %d / %d  -  %d of %d seats%s"):format(
+        page, pages, #roster, Portraits.MAX_MEMBERS,
+        removed > 0 and ("  -  %d uninvited"):format(removed) or ""))
+    self.memberInviteBtn:SetEnabled(#roster < Portraits.MAX_MEMBERS)
+end
+
+function UI:Uninvite(name)
+    local p = Portraits.Active()
+    if not p then
+        return
+    end
+    local full = WP.NormalizeName(name)
+    if not full then
+        WP.Print("Who should be removed? /wowpaint uninvite <player>")
+        return
+    end
+    if not Portraits.IsOwner(p, WP.PlayerFullName()) then
+        WP.Print("Only the portrait's creator can uninvite members.")
+        return
+    end
+    if not Portraits.IsMember(p, full) then
+        WP.Print(Ambiguate(full, "short") .. " is not a member of '" .. p.name .. "'.")
+        return
+    end
+    StaticPopup_Show("WOWPAINT_UNINVITE", Ambiguate(full, "short"), nil, { name = full })
+end
+
+function UI:DoUninvite(name)
+    local p = Portraits.Active()
+    if not p then
+        return
+    end
+    local ok, err = WP.Comm:SendKick(p, name)
+    if ok then
+        WP.Print("Removed " .. Ambiguate(name, "short") .. " from '" .. p.name .. "'.")
+    else
+        WP.Print(err or "Could not remove that member.")
+    end
 end
 
 ----------------------------------------------------------------------
@@ -609,7 +1286,7 @@ function UI:OnInviteClick()
     if UnitIsPlayer("target") and UnitIsFriend("player", "target") then
         prefill = GetUnitName("target", true) or ""
     end
-    local dialog = StaticPopup_Show("WOWPAINT_INVITE_SEND", p.name, nil, { prefill = prefill })
+    StaticPopup_Show("WOWPAINT_INVITE_SEND", p.name, nil, { prefill = prefill })
 end
 
 function UI:SendInvite(name)
@@ -625,51 +1302,39 @@ function UI:SendInvite(name)
     end
 end
 
-function UI:OnLockClick()
+-- `desired` is true/false from the explicit slash verbs; the button passes
+-- nil and toggles.
+function UI:OnLockClick(desired)
     local p = Portraits.Active()
-    if not p or not Portraits.Lockable(p) then
+    if not p then
+        return
+    end
+    if not Portraits.Lockable(p) then
+        WP.Print("The Shared canvas cannot be locked - create a portrait for work you want to freeze.")
         return
     end
     if not Portraits.IsOwner(p, WP.PlayerFullName()) then
         WP.Print("Only the portrait's creator can lock or unlock it.")
         return
     end
-    WP.Comm:SendLockState(p, not p.locked)
+    if desired == nil then
+        desired = not p.locked
+    end
+    if desired == p.locked then
+        WP.Print(("'%s' is already %s."):format(p.name, desired and "locked" or "unlocked"))
+        return
+    end
+    WP.Comm:SendLockState(p, desired)
 end
 
 function UI:ShowInvitePopup(data)
     StaticPopup_Show("WOWPAINT_INVITE_RECV", Ambiguate(data.from, "short"), data.name, data)
 end
 
-function UI:CyclePortrait()
-    local list = Portraits.List()
-    if #list <= 1 then
-        WP.Print("No other portraits - use New to create one.")
-        return
-    end
-    local activeId = Portraits.Active().id
-    local idx = 1
-    for i, p in ipairs(list) do
-        if p.id == activeId then
-            idx = i
-            break
-        end
-    end
-    local nextP = list[idx % #list + 1]
-    Portraits.SetActive(nextP.id)
-    self.galleryView = nil
-    self:UpdateAll()
-    WP.Comm:SendHello(nextP, false)
-end
-
 function UI:OnScopeClick()
     local p = Portraits.Active()
     if p.dist == "MEMBERS" then
-        local names = {}
-        for _, m in ipairs(p.members or {}) do
-            names[#names + 1] = Ambiguate(m, "short")
-        end
-        WP.Print("Members of '" .. p.name .. "': " .. table.concat(names, ", "))
+        self:ToggleMembers()
         return
     end
     local idx = 1
@@ -680,6 +1345,7 @@ function UI:OnScopeClick()
         end
     end
     p.dist = CHANNEL_ORDER[idx % #CHANNEL_ORDER + 1]
+    self:UpdateButtons()
     self:UpdateStatus()
 end
 
@@ -732,7 +1398,7 @@ function UI:UpdateStatus()
     end
     if self.galleryView then
         local e = self.galleryView.entry
-        self.status:SetText(("Viewing '%s' (saved %s) - read-only, close Gallery to paint"):format(
+        self.status:SetText(("Viewing '%s' (saved %s) - read-only"):format(
             e.name, date("%b %d", e.savedAt or 0)))
         return
     end
@@ -743,8 +1409,9 @@ function UI:UpdateStatus()
         text = "|cffffcc00Locked|r by " .. (p.lockedBy and Ambiguate(p.lockedBy, "short") or "owner")
             .. "  -  rev " .. p.rev
     elseif p.dist == "MEMBERS" then
-        local n = #(p.members or {})
-        text = ("Whispering %d member%s  -  rev %d"):format(n - 1 >= 0 and n or 0, n == 1 and "" or "s", p.rev)
+        -- The roster counts us; we whisper to everyone else on it.
+        local others = math.max(0, #(p.members or {}) - 1)
+        text = ("Whispering %d member%s  -  rev %d"):format(others, others == 1 and "" or "s", p.rev)
     else
         local chatType = WP.Comm:GetScopeChannel(p.dist)
         if chatType then
@@ -766,6 +1433,8 @@ function UI:UpdateButtons()
         return
     end
     local me = WP.PlayerFullName()
+    local viewing = self.galleryView ~= nil
+    local paintable = not viewing and not p.locked
 
     self.portraitBtn:SetText("Portrait: " .. p.name:sub(1, 14))
     if p.dist == "MEMBERS" then
@@ -773,16 +1442,33 @@ function UI:UpdateButtons()
     else
         self.scopeBtn:SetText("Scope: " .. (CHANNEL_LABELS[p.dist] or p.dist))
     end
-    self.inviteBtn:SetEnabled(p.dist == "MEMBERS" and not self.galleryView)
+    self.inviteBtn:SetEnabled(p.dist == "MEMBERS" and not viewing)
     if Portraits.Lockable(p) then
         self.lockBtn:Show()
         self.lockBtn:SetText(p.locked and "Unlock" or "Lock")
-        self.lockBtn:SetEnabled(Portraits.IsOwner(p, me))
+        self.lockBtn:SetEnabled(Portraits.IsOwner(p, me) and not viewing)
     else
         self.lockBtn:Hide()
     end
-    self.clearBtn:SetEnabled(not p.locked and not self.galleryView)
-    self.saveBtn:SetEnabled(not self.galleryView)
+    self.clearBtn:SetEnabled(paintable)
+    self.saveBtn:SetEnabled(not viewing)
+
+    for id, btn in pairs(self.toolBtns) do
+        btn:SetEnabled(paintable)
+        if id == self.tool then
+            btn:LockHighlight()
+        else
+            btn:UnlockHighlight()
+        end
+    end
+    self.sizeBtn:SetText("Nib " .. (self.brushSize or 1))
+    self.sizeBtn:SetEnabled(paintable)
+    self.undoBtn:SetEnabled(paintable and self:UndoIndex() ~= nil)
+    if WP.db.showGrid then
+        self.gridBtn:LockHighlight()
+    else
+        self.gridBtn:UnlockHighlight()
+    end
 end
 
 function UI:UpdateTitle()
@@ -806,8 +1492,11 @@ function UI:UpdateAll()
     self:UpdateTitle()
     self:UpdateButtons()
     self:UpdateStatus()
+    self:UpdateGrid()
     self:RedrawAll()
     self:RefreshGallery()
+    self:RefreshPicker()
+    self:RefreshMembers()
 end
 
 function UI:Toggle()

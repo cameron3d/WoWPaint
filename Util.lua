@@ -1,6 +1,6 @@
 local ADDON_NAME, WP = ...
 
-WP.VERSION = "0.3.0"
+WP.VERSION = "0.4.0"
 
 -- 64-character alphabet used for compact wire encoding. Every character is
 -- safe inside an addon message payload (printable ASCII, no "|", no ":",
@@ -47,6 +47,45 @@ function WP.ForLine(x0, y0, x1, y1, fn)
         if e2 <= dx then
             err = err + dx
             y0 = y0 + sy
+        end
+    end
+end
+
+-- Rectangle spanning two opposite corners, outline unless `filled`.
+function WP.ForRect(x0, y0, x1, y1, filled, fn)
+    local xa, xb = math.min(x0, x1), math.max(x0, x1)
+    local ya, yb = math.min(y0, y1), math.max(y0, y1)
+    for y = ya, yb do
+        for x = xa, xb do
+            if filled or x == xa or x == xb or y == ya or y == yb then
+                fn(x, y)
+            end
+        end
+    end
+end
+
+-- Ellipse inscribed in the box spanning two corners. Cell-centre membership
+-- test rather than a midpoint walk: at 64x64 the box is small enough that
+-- scanning it is free, and testing 4-neighbours for the outline gives a
+-- closed, 4-connected edge at every aspect ratio (midpoint variants leak at
+-- shallow slopes).
+function WP.ForEllipse(x0, y0, x1, y1, filled, fn)
+    local xa, xb = math.min(x0, x1), math.max(x0, x1)
+    local ya, yb = math.min(y0, y1), math.max(y0, y1)
+    local cx, cy = (xa + xb) / 2, (ya + yb) / 2
+    local rx, ry = (xb - xa) / 2 + 0.5, (yb - ya) / 2 + 0.5
+    local function inside(x, y)
+        local dx, dy = (x - cx) / rx, (y - cy) / ry
+        return dx * dx + dy * dy <= 1
+    end
+    for y = ya, yb do
+        for x = xa, xb do
+            if inside(x, y) then
+                if filled or not (inside(x - 1, y) and inside(x + 1, y)
+                    and inside(x, y - 1) and inside(x, y + 1)) then
+                    fn(x, y)
+                end
+            end
         end
     end
 end

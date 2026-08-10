@@ -43,6 +43,7 @@ local function SanitizePortrait(id, p)
     if id == Portraits.SHARED_ID then
         p.dist = VALID_SCOPES[p.dist] and p.dist or "AUTO"
         p.members = nil
+        p.removed = nil
         p.owner = nil
         p.locked = false
         p.lockedBy = nil
@@ -51,13 +52,21 @@ local function SanitizePortrait(id, p)
         local members = {}
         if type(p.members) == "table" then
             for _, m in ipairs(p.members) do
-                if type(m) == "string" and m ~= "" and #m <= 48
-                    and #members < Portraits.MAX_MEMBERS then
+                if Portraits.ValidMemberName(m) and #members < Portraits.MAX_MEMBERS then
                     members[#members + 1] = m
                 end
             end
         end
         p.members = members
+        local removed = {}
+        if type(p.removed) == "table" then
+            for _, m in ipairs(p.removed) do
+                if Portraits.ValidMemberName(m) and #removed < Portraits.MAX_REMOVED then
+                    removed[#removed + 1] = m
+                end
+            end
+        end
+        p.removed = removed
         p.owner = type(p.owner) == "string" and p.owner or nil
         p.locked = p.locked == true
         p.lockedBy = type(p.lockedBy) == "string" and p.lockedBy or nil
@@ -119,6 +128,21 @@ local function InitDB()
 
     if not db.portraits[db.activeId] then
         db.activeId = Portraits.SHARED_ID
+    end
+
+    -- Local tool preferences; the UI re-validates the tool id against its own
+    -- table, so only the numeric ranges need clamping here.
+    if type(db.brushSize) ~= "number" or db.brushSize < 1 or db.brushSize > 3 then
+        db.brushSize = 1
+    end
+    db.brushSize = math.floor(db.brushSize)
+    if type(db.color) ~= "number" or db.color < 0 or db.color >= Canvas.NUM_COLORS then
+        db.color = 3
+    end
+    db.color = math.floor(db.color)
+    db.showGrid = db.showGrid == true
+    if type(db.tool) ~= "string" then
+        db.tool = nil
     end
     WP.db = db
 end
@@ -216,9 +240,26 @@ SlashCmdList["WOWPAINT"] = function(input)
             WP.UI:EnsureFrame()
             StaticPopup_Show("WOWPAINT_DELETE_PORTRAIT", p.name, nil, { id = p.id })
         end
+    elseif cmd == "uninvite" or cmd == "kick" then
+        WP.UI:EnsureFrame()
+        if rest ~= "" then
+            WP.UI:Uninvite(rest)
+        else
+            WP.UI:ToggleMembers()
+        end
     elseif cmd == "lock" or cmd == "unlock" then
         WP.UI:EnsureFrame()
-        WP.UI:OnLockClick()
+        -- Explicit verbs, not a toggle: "/wowpaint lock" on a locked
+        -- portrait must not unlock it.
+        WP.UI:OnLockClick(cmd == "lock")
+    elseif cmd == "members" then
+        WP.UI:EnsureFrame()
+        WP.UI.frame:Show()
+        WP.UI:ToggleMembers()
+    elseif cmd == "portraits" then
+        WP.UI:EnsureFrame()
+        WP.UI.frame:Show()
+        WP.UI:TogglePicker()
     elseif cmd == "save" then
         WP.UI:EnsureFrame()
         if rest ~= "" then
@@ -262,6 +303,8 @@ SlashCmdList["WOWPAINT"] = function(input)
         WP.Print("  /wowpaint new [name] - create a portrait you can invite people to")
         WP.Print("  /wowpaint invite [player] - invite someone to the active portrait")
         WP.Print("  /wowpaint open <name> | list | delete <name> - manage portraits")
+        WP.Print("  /wowpaint portraits | members - open the picker / roster panels")
+        WP.Print("  /wowpaint uninvite [player] - remove a member (creator only)")
         WP.Print("  /wowpaint lock | unlock - freeze the active portrait (creator only)")
         WP.Print("  /wowpaint save [name] | gallery - snapshot to / browse your gallery")
         WP.Print("  /wowpaint channel auto|guild|party|raid - Shared canvas scope")

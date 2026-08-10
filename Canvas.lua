@@ -53,6 +53,38 @@ function Canvas.GetPixel(cells, x, y)
     return cells[Canvas.Index(x, y)]
 end
 
+-- Inverse of Index: flat array position back to 1-based (x, y).
+function Canvas.Coords(i)
+    return (i - 1) % Canvas.SIZE + 1, math.floor((i - 1) / Canvas.SIZE) + 1
+end
+
+-- 4-connected flood fill of the region matching the colour under (x, y).
+-- Calls fn(x, y) for each cell of the region and returns how many there
+-- were. Purely a read: the caller decides what to paint, so filling cannot
+-- disturb the traversal.
+function Canvas.FloodFill(cells, x, y, fn)
+    if x < 1 or x > Canvas.SIZE or y < 1 or y > Canvas.SIZE then
+        return 0
+    end
+    local target = cells[Canvas.Index(x, y)]
+    local seen, stack, n = {}, { x, y }, 0
+    while #stack > 0 do
+        local cy = table.remove(stack)
+        local cx = table.remove(stack)
+        local i = Canvas.Index(cx, cy)
+        if not seen[i] and cells[i] == target then
+            seen[i] = true
+            n = n + 1
+            fn(cx, cy)
+            if cx > 1 then stack[#stack + 1] = cx - 1; stack[#stack + 1] = cy end
+            if cx < Canvas.SIZE then stack[#stack + 1] = cx + 1; stack[#stack + 1] = cy end
+            if cy > 1 then stack[#stack + 1] = cx; stack[#stack + 1] = cy - 1 end
+            if cy < Canvas.SIZE then stack[#stack + 1] = cx; stack[#stack + 1] = cy + 1 end
+        end
+    end
+    return n
+end
+
 function Canvas.Clear(cells)
     for i = 1, Canvas.NUM_CELLS do
         cells[i] = 0

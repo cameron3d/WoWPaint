@@ -204,6 +204,130 @@ end
 Portraits.AddMembers(p, big)
 check(#p.members <= Portraits.MAX_MEMBERS, "roster respects MAX_MEMBERS cap")
 
+-- Member-name validation -----------------------------------------------------
+
+check(Portraits.ValidMemberName("Bob-Testrealm"), "ValidMemberName accepts Name-Realm")
+check(Portraits.ValidMemberName("\195\129strid-Ravencrest"),
+    "ValidMemberName accepts accented (non-ASCII) names")
+check(not Portraits.ValidMemberName("|cffff0000Bob|r-Realm"),
+    "ValidMemberName rejects chat escapes")
+check(not Portraits.ValidMemberName("A,B-Realm"), "ValidMemberName rejects the roster delimiter")
+check(not Portraits.ValidMemberName("A:B-Realm"), "ValidMemberName rejects the protocol delimiter")
+check(not Portraits.ValidMemberName("-Alice-Realm") and not Portraits.ValidMemberName("+Alice-Realm"),
+    "ValidMemberName rejects tombstone/revoke marks, so a name cannot forge one")
+check(not Portraits.ValidMemberName(string.rep("x", 49)), "ValidMemberName caps length")
+
+local escaped = Portraits.Create("Escapes", "MEMBERS", nil, "Owner-Testrealm")
+Portraits.AddMembers(escaped, { "|cff00ff00Sneak|r-Realm", "Fine-Realm" })
+check(#escaped.members == 2 and escaped.members[2] == "Fine-Realm",
+    "AddMembers drops names carrying chat escapes")
+
+-- Uninvite tombstones --------------------------------------------------------
+
+local kicked = Portraits.Create("Kicks", "MEMBERS", nil, "Owner-Testrealm")
+Portraits.AddMembers(kicked, { "Ann-Realm", "Ben-Realm" })
+check(Portraits.RemoveMembers(kicked, { "Ann-Realm" }) == true, "RemoveMembers drops the member")
+check(not Portraits.IsMember(kicked, "Ann-Realm") and #kicked.members == 2,
+    "removed member is off the roster")
+check(Portraits.IsRemoved(kicked, "Ann-Realm"), "removal leaves a tombstone")
+Portraits.AddMembers(kicked, { "Ann-Realm" })
+check(not Portraits.IsMember(kicked, "Ann-Realm"),
+    "roster gossip cannot resurrect a tombstoned member")
+Portraits.RemoveMembers(kicked, { "Owner-Testrealm" })
+check(Portraits.IsMember(kicked, "Owner-Testrealm") and not Portraits.IsRemoved(kicked, "Owner-Testrealm"),
+    "the creator cannot be uninvited")
+check(Portraits.Unremove(kicked, "Ann-Realm") == true, "Unremove lifts a tombstone")
+Portraits.AddMembers(kicked, { "Ann-Realm" })
+check(Portraits.IsMember(kicked, "Ann-Realm"), "re-invite works once the tombstone is lifted")
+
+-- Drawing tools --------------------------------------------------------------
+
+local function collect(fn)
+    local pts, seen = {}, {}
+    fn(function(x, y)
+        local key = x .. ":" .. y
+        if seen[key] then
+            pts.dup = true
+        end
+        seen[key] = true
+        pts[#pts + 1] = { x, y }
+    end)
+    return pts, seen
+end
+
+pts = collect(function(add) WP.ForRect(4, 4, 8, 7, false, add) end)
+check(#pts == 2 * 5 + 2 * 4 - 4 and not pts.dup, "ForRect outlines a 5x4 box without repeats")
+pts = collect(function(add) WP.ForRect(8, 7, 4, 4, true, add) end)
+check(#pts == 20, "ForRect fills from reversed corners too")
+pts = collect(function(add) WP.ForRect(3, 3, 3, 3, false, add) end)
+check(#pts == 1, "ForRect degenerates to a single cell")
+
+local outlinePts, outline = collect(function(add) WP.ForEllipse(10, 10, 20, 16, false, add) end)
+local filledPts, filled = collect(function(add) WP.ForEllipse(10, 10, 20, 16, true, add) end)
+check(#filledPts > #outlinePts and not filledPts.dup and not outlinePts.dup,
+    "ForEllipse fills more than it outlines, neither with repeats")
+
+ok = true
+for key in pairs(outline) do
+    if not filled[key] then
+        ok = false
+    end
+end
+check(ok, "ForEllipse outline is a subset of its fill")
+
+-- Closure: on every row and column of the filled shape, the two extreme
+-- cells must belong to the outline. A leaky outline (the classic midpoint
+-- failure at shallow slopes) breaks this.
+local rows, cols = {}, {}
+for _, c in ipairs(filledPts) do
+    local x, y = c[1], c[2]
+    rows[y] = rows[y] or { x, x }
+    rows[y][1], rows[y][2] = math.min(rows[y][1], x), math.max(rows[y][2], x)
+    cols[x] = cols[x] or { y, y }
+    cols[x][1], cols[x][2] = math.min(cols[x][1], y), math.max(cols[x][2], y)
+end
+ok = true
+for y, r in pairs(rows) do
+    if not outline[r[1] .. ":" .. y] or not outline[r[2] .. ":" .. y] then
+        ok = false
+    end
+end
+for x, c in pairs(cols) do
+    if not outline[x .. ":" .. c[1]] or not outline[x .. ":" .. c[2]] then
+        ok = false
+    end
+end
+check(ok, "ForEllipse outline closes on every row and column")
+pts = collect(function(add) WP.ForEllipse(5, 5, 5, 5, false, add) end)
+check(#pts == 1, "ForEllipse degenerates to a single cell")
+
+-- Flood fill -----------------------------------------------------------------
+
+local fillCells = {}
+for i = 1, Canvas.NUM_CELLS do
+    fillCells[i] = 0
+end
+check(Canvas.FloodFill(fillCells, 1, 1, function() end) == Canvas.NUM_CELLS,
+    "FloodFill covers a blank canvas exactly once")
+-- Wall down column 32 splits the canvas; the left region is 31 columns wide.
+for y = 1, Canvas.SIZE do
+    fillCells[Canvas.Index(32, y)] = 5
+end
+check(Canvas.FloodFill(fillCells, 1, 1, function() end) == 31 * Canvas.SIZE,
+    "FloodFill stops at a colour boundary")
+check(Canvas.FloodFill(fillCells, 32, 1, function() end) == Canvas.SIZE,
+    "FloodFill follows the wall itself")
+check(Canvas.FloodFill(fillCells, 0, 1, function() end) == 0, "FloodFill rejects out-of-bounds seeds")
+
+ok = true
+for _, i in ipairs({ 1, 64, 65, 2048, Canvas.NUM_CELLS }) do
+    local x, y = Canvas.Coords(i)
+    if Canvas.Index(x, y) ~= i then
+        ok = false
+    end
+end
+check(ok, "Canvas.Coords inverts Canvas.Index")
+
 -- Snapshot header with lock flag ---------------------------------------------
 
 local header = "S" .. p.id .. ":3:41:1234:L:" .. "0A0B"
@@ -229,6 +353,123 @@ local invite = "I" .. p.id .. ":Owner-Testrealm:Fan: Art"
 local iowner, iname = invite:sub(8):match("^:(.-):(.*)$")
 check(iowner == "Owner-Testrealm" and iname == "Fan: Art",
     "invite parsing splits owner and keeps colons in the trailing name")
+
+-- Inbound protocol: trust rules for rosters, locks and uninvites -------------
+--
+-- Comm only touches the game API through a handful of globals, so stubbing
+-- them lets the desktop suite drive real messages through OnMessage. This is
+-- where the trust rules live, and they are the part of the addon a hostile
+-- peer talks to directly.
+
+local now = 1000
+GetTime = function() return now end
+UnitName = function() return "Me" end
+UnitFullName = function() return "Me", "Testrealm" end
+Ambiguate = function(name) return (name:gsub("%-.*", "")) end
+IsInGuild = function() return false end
+IsInGroup = function() return false end
+IsInRaid = function() return false end
+C_ChatInfo = { RegisterAddonMessagePrefix = function() end, SendAddonMessage = function() end }
+C_Timer = { NewTicker = function() end, After = function() end }
+
+local noop = function() end
+WP.Print = noop
+WP.UI = setmetatable({}, { __index = function() return noop end })
+WP.playerFullName = "Me-Testrealm"
+
+loadModule("Comm.lua")
+local Comm = WP.Comm
+
+local OWNER, OTHER = "Owner-Testrealm", "Other-Testrealm"
+
+local function newShared(id, owner, members)
+    local sp = Portraits.Create("Wire" .. id, "MEMBERS", id, owner)
+    Portraits.AddMembers(sp, members)
+    return sp
+end
+
+local function sent(match)
+    for _, item in ipairs(Comm.queue) do
+        if item.msg:find(match, 1, true) then
+            return item
+        end
+    end
+    return nil
+end
+
+-- Roster tombstones are honoured from the owner and from nobody else.
+local wire = newShared("aaaaaa", OWNER, { OWNER, OTHER, "Ann-Testrealm" })
+Comm:OnMessage("WoWPaint", "Maaaaaa:-Ann-Testrealm", "WHISPER", OTHER)
+check(Portraits.IsMember(wire, "Ann-Testrealm"),
+    "a plain member cannot uninvite anyone through roster gossip")
+Comm:OnMessage("WoWPaint", "Maaaaaa:-Ann-Testrealm", "WHISPER", OWNER)
+check(not Portraits.IsMember(wire, "Ann-Testrealm") and Portraits.IsRemoved(wire, "Ann-Testrealm"),
+    "the owner's roster tombstone removes the member")
+Comm:OnMessage("WoWPaint", "Maaaaaa:Ann-Testrealm", "WHISPER", OTHER)
+check(not Portraits.IsMember(wire, "Ann-Testrealm"),
+    "a stale peer's roster cannot resurrect the uninvited member")
+Comm:OnMessage("WoWPaint", "Maaaaaa:+Ann-Testrealm", "WHISPER", OWNER)
+check(Portraits.IsMember(wire, "Ann-Testrealm"), "the owner can lift a tombstone and re-add")
+
+-- Locking is the owner's in both directions.
+Comm:OnMessage("WoWPaint", "Laaaaaa", "WHISPER", OTHER)
+check(not wire.locked, "a plain member cannot lock the portrait")
+Comm:OnMessage("WoWPaint", "Laaaaaa", "WHISPER", OWNER)
+check(wire.locked, "the owner can lock the portrait")
+Comm:OnMessage("WoWPaint", "Uaaaaaa", "WHISPER", OTHER)
+check(wire.locked, "a plain member cannot unlock the portrait")
+Comm:OnMessage("WoWPaint", "Uaaaaaa", "WHISPER", OWNER)
+check(not wire.locked, "the owner can unlock the portrait")
+
+-- Locked canvases drop inbound paint, and only the owner answers with a nag.
+wire.locked = true
+local before = wire.cells[Canvas.Index(1, 1)]
+Comm.queue = {}
+Comm:OnMessage("WoWPaint", "Baaaaaa" .. WP.EncodeChar(0) .. WP.EncodeChar(0) .. WP.EncodeChar(5),
+    "WHISPER", OTHER)
+check(wire.cells[Canvas.Index(1, 1)] == before, "paint on a locked portrait is dropped")
+check(sent("Laaaaaa") == nil, "a non-owner does not nag stale painters (its L is ignored anyway)")
+wire.locked = false
+
+-- Being uninvited drops the local copy, but only when the owner says so.
+local victim = newShared("bbbbbb", OWNER, { OWNER, "Me-Testrealm" })
+Comm:OnMessage("WoWPaint", "Kbbbbbb", "WHISPER", OTHER)
+check(Portraits.Get("bbbbbb") ~= nil, "a stranger cannot uninvite us")
+Comm:OnMessage("WoWPaint", "Kbbbbbb", "WHISPER", OWNER)
+check(Portraits.Get("bbbbbb") == nil, "the owner's uninvite deletes our copy")
+
+-- The owner's own uninvite: notify first, then drop them from the roster.
+local mine = Portraits.Create("Mine", "MEMBERS", "cccccc", "Me-Testrealm")
+-- Three on the roster: someone has to still be there to receive the gossip.
+Portraits.AddMembers(mine, { "Me-Testrealm", OTHER, "Ann-Testrealm" })
+Comm.queue = {}
+ok = Comm:SendKick(mine, OTHER)
+check(ok == true, "the creator may uninvite a member")
+check(not Portraits.IsMember(mine, OTHER) and Portraits.IsRemoved(mine, OTHER),
+    "uninvite removes and tombstones locally")
+local kickMsg, rosterMsg = sent("Kcccccc"), sent("Mcccccc")
+check(kickMsg ~= nil and kickMsg.target == OTHER, "the removed player is told directly")
+check(rosterMsg ~= nil and rosterMsg.msg:find("-" .. OTHER, 1, true) ~= nil,
+    "remaining members receive the tombstone in the roster gossip")
+check(not Comm:SendKick(mine, "Me-Testrealm"), "the creator cannot uninvite themselves")
+local notMine = Portraits.Create("NotMine", "MEMBERS", "dddddd", OWNER)
+Portraits.AddMembers(notMine, { OWNER, "Me-Testrealm", "Ann-Testrealm" })
+check(not Comm:SendKick(notMine, "Ann-Testrealm"),
+    "a plain member cannot uninvite anyone")
+
+-- Batches are un-counted once each when a remote clear drops them, even when
+-- two batches carry byte-identical ops.
+local rev = Portraits.Create("Rev", "MEMBERS", "eeeeee", "Me-Testrealm")
+Portraits.AddMembers(rev, { "Me-Testrealm", OWNER, OTHER })
+Comm.queue = {}
+local dup = WP.EncodeChar(0) .. WP.EncodeChar(0) .. WP.EncodeChar(5)
+rev.rev = 2
+Comm:Send(rev, "Beeeeee" .. dup, 101) -- two members => two queued copies each
+Comm:Send(rev, "Beeeeee" .. dup, 102)
+check(#Comm.queue == 4, "a MEMBERS batch is queued once per other member")
+Comm:DropQueuedPaints("eeeeee")
+check(#Comm.queue == 0, "a remote clear drops every queued copy")
+check(rev.rev == 0, "each dropped batch un-counts exactly one revision")
 
 --------------------------------------------------------------------------
 

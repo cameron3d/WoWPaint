@@ -156,9 +156,10 @@ New whisper-only messages:
 | J | `J<id>` | invite accepted (honored only if we invited that player for that id within 120 s) |
 | M | `M<id>:<name1>,<name2>,…` | roster update, union-merge; chunked if long; trusted only from existing members |
 
-Accept flow: invitee creates a local stub `{members = {self, inviter}}`, whispers `J`; the
-inviter adds them, whispers the full roster (`M`) to every member, and streams the canvas
-(`S` chunks) straight to the new member (no offer negotiation — the inviter is the source).
+Accept flow: invitee creates a local stub `{members = {self, inviter, owner}}`, whispers `J`;
+the inviter adds them, whispers the full roster (`M`) to every member, and offers the canvas
+(`O`, then the standard `G`/`S` exchange). Implementation note: the offer path was chosen over
+streaming blind so the joiner keeps its usual guards, timeouts and one-transfer-at-a-time rule.
 
 Trust rules: B/C/M/paint-affecting messages for a member portrait are accepted only from
 players already on the local roster; `J` only from pending invitees; `I` from anyone (that is
@@ -220,3 +221,78 @@ after a confirm. Gallery entries never sync — each player curates their own co
 Second bottom row: **[Portrait ▸] [New] [Invite] [Lock/Unlock] [Save] [Gallery]**
 (Lock shown only to the owner of a lockable portrait; Save/Gallery always). Slash additions:
 `/wowpaint lock`, `unlock`, `save [name]`, `gallery`.
+
+---
+
+# v0.4 — Tools, panels, and owner authority (2026-08-10, user-requested)
+
+**Requirements:** a GUI for choosing which portrait to paint; owner-only locking *and*
+uninviting; a real drawing toolset.
+
+## Drawing tools
+
+A tool row above the palette: **Pencil, Line, Box, Circle, Fill, Pick**, plus **Nib** (1–3
+cell freehand width), **Undo**, and **Grid**. The right mouse button still means "erase", so
+every tool has a subtractive twin without doubling the buttons; Shift fills Box and Circle.
+
+- Shapes are previewed by writing straight to the cell textures during the drag and are only
+  committed on release, so an in-progress box costs no wire traffic. Dragging off the canvas
+  clamps to the edge rather than cancelling.
+- Fill is a 4-connected flood over the colour under the cursor. The region is collected before
+  anything is painted, because the walk reads the cells the paint would be mutating. A
+  whole-canvas fill is ~4096 ops ≈ 54 batched messages ≈ 19 s of throttled queue: slow, never
+  a disconnect risk.
+- Undo keeps the last 20 actions per session as `(cell, previous colour)` lists and replays
+  them newest-first through the normal paint path — peers see a repaint, not a rewind, which
+  is the only thing that can work without a server. Undo is not itself undoable.
+- Geometry (`ForRect`, `ForEllipse`) and `Canvas.FloodFill` live in the pure-logic modules so
+  the desktop suite covers them. The ellipse uses a cell-centre membership test with a
+  4-neighbour edge rule: midpoint variants leak at shallow slopes, and a leaky outline is
+  visible on a 64-cell grid.
+
+## Panels
+
+Three side panels share the frame: **Portraits** and **Members** on the left (mutually
+exclusive), **Gallery** on the right. All are `UISpecialFrames` (Escape closes).
+
+- **Portraits** — the picker. One row per portrait: name, lock marker, member count or shared
+  scope, "yours" for portraits you created, with **Paint** and **Remove**, paged, plus **New
+  portrait**. The bottom-bar Portrait button opens it (it used to blind-cycle).
+- **Members** — the roster. Owner sees **Uninvite** on every row but their own; everyone gets
+  **Invite**. Opened from the `Members: N` button, which also carries a roster tooltip.
+- **Gallery** — unchanged, plus the **Back to painting** control v0.3 specified and never got.
+
+## Owner authority
+
+- **Locking is owner-only in both directions.** v0.3 let any roster member relay a lock so
+  stale painters converged without the owner online. That also let a straggler who missed an
+  unlock drag the owner back into it, and handed every member a freeze button. Locked clients
+  now just drop inbound paints, so a straggler diverges from nobody, and only the owner sends
+  the "it's locked" nag.
+- **Uninvite (`K<id>`, whispered, owner only).** The removed player deletes their local copy;
+  anything still whispered at them for that id is ignored as an unknown portrait.
+- Rosters union-merge, so a bare removal would be undone by the next gossip from a member who
+  had not heard about it. Every removal leaves an **add-only tombstone**, and the `M` payload
+  grew a token grammar: `name` adds, `-name` tombstones, `+name` lifts a tombstone. Removals
+  and revocations are honoured **from the owner only**. `ValidMemberName` rejects names
+  starting with `-`/`+` so a member cannot be laundered into a kick for someone else, and
+  rejects `|`, `,`, `:` and control characters (chat escapes and both delimiters).
+- The owner may re-invite someone they removed (the invite lifts the tombstone and gossips
+  `+name`); anyone else's re-invite is refused locally, since every peer's tombstone would
+  filter it out anyway.
+
+## Review fixes folded in (v0.2/v0.3 code)
+
+- `/wowpaint lock` on a locked portrait unlocked it — both verbs routed to a toggle.
+- Queued-paint drops after a remote clear deduplicated by message *content*, so two batches
+  with identical ops (paint a cell, erase it, paint it again) un-counted one `rev` instead of
+  two and left the client permanently ahead of its peers. Batches now carry a send tag.
+- The invitee's roster stub was built as a table literal, so a `nil` in the middle would
+  truncate the `ipairs` walk and leave a roster that trusts nobody.
+- Status read "Whispering N members" while whispering to N−1 (the roster counts you).
+- `pendingInvites` never dropped expired entries; Lock stayed live while viewing the gallery.
+
+## Still out of scope
+
+Redo, per-pixel author attribution, freehand strokes, a leave protocol (deleting a portrait
+is still a local act), and any lock stronger than a convention between unmodified clients.
