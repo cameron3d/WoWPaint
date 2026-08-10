@@ -181,3 +181,42 @@ its purpose); unknown portrait ids are ignored (ids are unguessable in practice)
 - No leave protocol, no kick, no ownership enforcement beyond roster trust.
 - Offline members simply miss events and re-sync via rev negotiation next time both sides
   are online with the portrait open.
+
+---
+
+# v0.3 — Gallery and locking (2026-08-10, user-requested)
+
+**Requirement:** a gallery to save portraits to, and the ability to lock portraits.
+
+## Gallery (purely local, no protocol)
+
+`db.gallery` is an ordered list of immutable snapshots: `{ name, cells (deep copy), savedAt,
+source = portrait name }`. A **Save** control copies the active portrait's canvas at that
+moment; saving again later creates a second entry. A **Gallery** panel lists entries
+(name + date, paged) with **View** and **Delete**. View renders the entry read-only into the
+main canvas grid with painting disabled and a **Back** control; Delete removes the local copy
+after a confirm. Gallery entries never sync — each player curates their own collection.
+
+## Locking
+
+- `portrait.locked` / `portrait.lockedBy`, persisted. The **owner** (creator) locks and
+  unlocks; the built-in Shared portrait has no owner and cannot be locked.
+- Wire: `L<id>` (lock) and `U<id>` (unlock), sent on the portrait's normal distribution.
+  Trust: `U` is honored from the owner only. `L` is honored from the owner **or any roster
+  member** (lock-relay) — when a locked client receives a paint/clear from a peer that
+  evidently missed the lock, it drops the ops and whispers `L<id>` back (throttled 30 s per
+  sender), so stale painters converge to locked without owner presence. A malicious member
+  can therefore freeze a portrait early, but that is within the existing roster trust class
+  (they could equally scribble over it), and the owner can always unlock.
+- While locked: local painting and Clear are blocked in the UI (status shows "Locked by X"),
+  inbound B/C are dropped, and L/U do not bump `rev`. Snapshot sync stays fully active so
+  canvases still converge after stragglers; the `S` chunk header gains a lock-state field so
+  late joiners and re-syncers adopt the lock with the pixels.
+- Inviting to a locked portrait remains allowed — it is the sharing mechanism for finished
+  art (new member receives roster, canvas, and lock state; sees it read-only).
+
+## UI (v0.2 + v0.3 combined)
+
+Second bottom row: **[Portrait ▸] [New] [Invite] [Lock/Unlock] [Save] [Gallery]**
+(Lock shown only to the owner of a lockable portrait; Save/Gallery always). Slash additions:
+`/wowpaint lock`, `unlock`, `save [name]`, `gallery`.
