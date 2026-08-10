@@ -1,6 +1,6 @@
 local ADDON_NAME, WP = ...
 
-WP.VERSION = "0.1.0"
+WP.VERSION = "0.3.0"
 
 -- 64-character alphabet used for compact wire encoding. Every character is
 -- safe inside an addon message payload (printable ASCII, no "|", no ":",
@@ -62,6 +62,19 @@ function WP.PlayerFullName()
         end
     end
     return WP.playerFullName
+end
+
+-- Names on the wire and in rosters are always Name-Realm. Senders and typed
+-- names may arrive bare (same realm); normalize by appending our own realm.
+function WP.NormalizeName(name)
+    if type(name) ~= "string" or name == "" then
+        return nil
+    end
+    if name:find("-", 1, true) then
+        return name
+    end
+    local realm = GetNormalizedRealmName and GetNormalizedRealmName() or nil
+    return realm and (name .. "-" .. realm) or name
 end
 
 -- True if an addon message sender is this player. CHAT_MSG_ADDON senders may

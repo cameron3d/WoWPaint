@@ -3,6 +3,12 @@
 
 local WP = {}
 
+-- Minimal WoW-global stubs so pure-logic modules load on desktop Lua.
+time = time or os.time
+GetNormalizedRealmName = GetNormalizedRealmName or function()
+    return "Testrealm"
+end
+
 local function loadModule(file)
     local paths = { file, "../" .. file }
     for _, p in ipairs(paths) do
@@ -17,8 +23,13 @@ end
 
 loadModule("Util.lua")
 loadModule("Canvas.lua")
+loadModule("Portraits.lua")
 
 local Canvas = WP.Canvas
+local Portraits = WP.Portraits
+WP.db = { portraits = {}, gallery = {}, activeId = Portraits.SHARED_ID }
+WP.Comm = { FlushPaintOps = function() end } -- SetActive flushes via Comm
+
 local failures = 0
 
 local function check(cond, label)
@@ -149,7 +160,75 @@ check(ok, "ForLine is contiguous with correct endpoints on a diagonal")
 
 local op = WP.EncodeChar(63) .. WP.EncodeChar(63) .. WP.EncodeChar(15)
 check(#op == 3, "one paint op is exactly 3 chars")
-check(1 + 78 * 3 <= 240, "max batch message stays under 240 chars")
+check(1 + 6 + 76 * 3 <= 240, "max batch message (kind + id + ops) stays under 240 chars")
+
+-- Portrait ids and names -----------------------------------------------------
+
+math.randomseed(7)
+ok = true
+for _ = 1, 50 do
+    local id = Portraits.GenerateId()
+    if not Portraits.ValidId(id) or id == Portraits.SHARED_ID then
+        ok = false
+    end
+end
+check(ok, "GenerateId produces valid non-reserved 6-char ids")
+check(Portraits.ValidId("000000"), "reserved Shared id is valid on the wire")
+check(not Portraits.ValidId("00000"), "ValidId rejects short ids")
+check(not Portraits.ValidId("0000000"), "ValidId rejects long ids")
+check(not Portraits.ValidId("00:000"), "ValidId rejects delimiter characters")
+check(not Portraits.ValidId(nil), "ValidId rejects nil")
+
+check(Portraits.SanitizeName("  My|Art,Work  ") == "MyArtWork", "SanitizeName strips pipes, commas, padding")
+check(#Portraits.SanitizeName(string.rep("x", 60)) == Portraits.MAX_NAME, "SanitizeName caps length")
+
+-- Name normalization ---------------------------------------------------------
+
+check(WP.NormalizeName("Bob") == "Bob-Testrealm", "NormalizeName appends our realm to bare names")
+check(WP.NormalizeName("Bob-Other") == "Bob-Other", "NormalizeName keeps existing realm")
+check(WP.NormalizeName("") == nil and WP.NormalizeName(nil) == nil, "NormalizeName rejects empty input")
+
+-- Roster union-merge ---------------------------------------------------------
+
+local p = Portraits.Create("Test", "MEMBERS", nil, "Owner-Testrealm")
+check(Portraits.IsMember(p, "Owner-Testrealm"), "creator starts as a member")
+check(Portraits.AddMembers(p, { "A-Realm", "B-Realm" }) == true, "AddMembers adds new names")
+check(Portraits.AddMembers(p, { "A-Realm", "B-Realm" }) == false, "AddMembers is idempotent (union)")
+check(#p.members == 3, "roster has exactly the union")
+Portraits.AddMembers(p, { "", 42 })
+check(#p.members == 3, "AddMembers rejects empty and non-string names")
+local big = {}
+for i = 1, 50 do
+    big[i] = "Extra" .. i .. "-Realm"
+end
+Portraits.AddMembers(p, big)
+check(#p.members <= Portraits.MAX_MEMBERS, "roster respects MAX_MEMBERS cap")
+
+-- Snapshot header with lock flag ---------------------------------------------
+
+local header = "S" .. p.id .. ":3:41:1234:L:" .. "0A0B"
+local hid = header:sub(2, 7)
+local hi, hn, hrev, hflag, hdata = header:sub(8):match("^:(%d+):(%d+):(%d+):([LU]):(.*)$")
+check(hid == p.id and tonumber(hi) == 3 and tonumber(hn) == 41 and tonumber(hrev) == 1234
+    and hflag == "L" and hdata == "0A0B", "S chunk header parses with lock flag")
+check(("S" .. p.id .. ":1:1:0:X:aa"):sub(8):match("^:(%d+):(%d+):(%d+):([LU]):(.*)$") == nil,
+    "S chunk header rejects unknown lock flags")
+
+-- Gallery copies are independent ---------------------------------------------
+
+p.cells[1] = 7
+local entry = Portraits.SaveToGallery(p, "Snapshot")
+p.cells[1] = 12
+check(entry.cells[1] == 7, "gallery entry is a deep copy, not a reference")
+check(entry.name == "Snapshot", "gallery entry keeps its given name")
+p.cells[1] = 0
+
+-- Invite wire format ---------------------------------------------------------
+
+local invite = "I" .. p.id .. ":Owner-Testrealm:Fan: Art"
+local iowner, iname = invite:sub(8):match("^:(.-):(.*)$")
+check(iowner == "Owner-Testrealm" and iname == "Fan: Art",
+    "invite parsing splits owner and keeps colons in the trailing name")
 
 --------------------------------------------------------------------------
 
