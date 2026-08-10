@@ -12,12 +12,8 @@ verification is in the client, and that cannot start until the build is in place
 Classic Era and Anniversary realms both run the `_classic_era_` client:
 
 ```
-<WoW install>\_classic_era_\Interface\AddOns\WoWPaint\
+F:\World of Warcraft\_classic_era_\Interface\AddOns\WoWPaint\
 ```
-
-> **Path not yet pinned.** No WoW install was found on `C:`, `D:` or `E:` as of 2026-08-10.
-> Replace `<WoW install>` below with the real one the first time it is known, and delete this
-> note. Typical value: `C:\Program Files (x86)\World of Warcraft`.
 
 The folder name must be exactly `WoWPaint`, matching `WoWPaint.toc`, or the client ignores it.
 
@@ -27,7 +23,7 @@ Only what the client loads: `WoWPaint.toc` and the six `.lua` files it lists. Ke
 `tests/`, `.git/` and `.claude/` out of the AddOns folder — the client never reads them.
 
 ```bash
-WOW_ADDONS="/c/Program Files (x86)/World of Warcraft/_classic_era_/Interface/AddOns"
+WOW_ADDONS="/f/World of Warcraft/_classic_era_/Interface/AddOns"
 mkdir -p "$WOW_ADDONS/WoWPaint" && cp WoWPaint.toc *.lua "$WOW_ADDONS/WoWPaint/"
 ```
 
