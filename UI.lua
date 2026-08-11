@@ -823,8 +823,48 @@ function UI:BuildBottomBars(f)
     self.inviteBtn = rowBtn(60, "Invite", function()
         UI:OnInviteClick()
     end)
+    -- A disabled button cannot be clicked, so the chat message explaining why
+    -- it is disabled never reaches the person who needs it. Keep the mouse
+    -- scripts alive while disabled and say it in the tooltip instead.
+    self.inviteBtn:SetMotionScriptsWhileDisabled(true)
+    self.inviteBtn:SetScript("OnEnter", function(btn)
+        local p = Portraits.Active()
+        GameTooltip:SetOwner(btn, "ANCHOR_TOP")
+        GameTooltip:AddLine("Invite")
+        if UI.galleryView then
+            GameTooltip:AddLine("Not while viewing a saved piece - go back to painting first.",
+                1, 1, 1, true)
+        elseif p and p.dist ~= "MEMBERS" then
+            GameTooltip:AddLine("The Shared canvas has no roster: everyone in your scope already paints it. Use New to create a portrait you can invite people to.",
+                1, 1, 1, true)
+        else
+            GameTooltip:AddLine("Whisper an invitation. Prefills a friendly target if you have one.",
+                1, 1, 1, true)
+        end
+        GameTooltip:Show()
+    end)
+    self.inviteBtn:SetScript("OnLeave", function()
+        GameTooltip:Hide()
+    end)
+
     self.lockBtn = rowBtn(62, "Lock", function()
         UI:OnLockClick()
+    end)
+    self.lockBtn:SetMotionScriptsWhileDisabled(true)
+    self.lockBtn:SetScript("OnEnter", function(btn)
+        local p = Portraits.Active()
+        GameTooltip:SetOwner(btn, "ANCHOR_TOP")
+        GameTooltip:AddLine(p and p.locked and "Unlock" or "Lock")
+        if p and not Portraits.IsOwner(p, WP.PlayerFullName()) then
+            GameTooltip:AddLine("Only the portrait's creator can lock or unlock it.", 1, 1, 1, true)
+        else
+            GameTooltip:AddLine("Freezes the portrait for everyone: no painting, no clearing, until you unlock it. Inviting still works, which is how you share finished art.",
+                1, 1, 1, true)
+        end
+        GameTooltip:Show()
+    end)
+    self.lockBtn:SetScript("OnLeave", function()
+        GameTooltip:Hide()
     end)
     self.saveBtn = rowBtn(50, "Save", function()
         if not UI.galleryView then
