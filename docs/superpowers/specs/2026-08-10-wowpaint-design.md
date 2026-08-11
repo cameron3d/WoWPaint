@@ -314,3 +314,90 @@ the canvas window instead of its child: it anchors beside the canvas when that i
 centre-screen when it is not, and it gained **Open the canvas** and **Gallery** buttons. Picking
 a portrait raises the canvas window. It sits at HIGH strata — above the canvas, below the
 StaticPopups it opens.
+
+---
+
+# v0.5 — Larger canvases, zoom, and Battle.net bulk sync (2026-08-11, user-requested)
+
+**Requirement:** bigger canvases, and/or zooming in and out.
+
+Both, as it turned out: bigger canvases need zoom anyway, because a 128-cell grid does not
+fit a 512px widget at a usable cell size. Shipped in two stages so the risk was staged too —
+stage 1 changed no wire format at all.
+
+## Why 64 was the old ceiling
+
+The wire alphabet is 64 characters, so a paint op packed x, y and colour into one character
+each. 64x64 is the largest grid where a coordinate fits in a single character. Two other
+things scaled with area: snapshot sync (2 chars per cell worst case, 200 chars per whisper)
+and the texture grid (one texture per cell, forever).
+
+## Stage 1 — virtualized viewport (no protocol change)
+
+Textures are allocated per **visible slot**, not per canvas cell, and the window they show is
+moved by panning. Rendering cost therefore tracks the viewport rather than the canvas; a
+fixed per-cell grid would have needed 16384 textures at 128x128. The pool grows lazily and
+never shrinks, so a 64x64 canvas at 8px still allocates exactly the 4096 textures it always
+did.
+
+Zoom levels are 4/8/16/32 px per cell, offered from the level where the whole canvas fits and
+inwards — there is deliberately no zoom-out past that, since it would only shrink the picture
+inside a fixed widget. The wheel zooms and keeps what is under the cursor in view;
+middle-drag pans; pan is disabled when the whole canvas is on screen.
+
+All of the arithmetic (`VisibleCells`, `FitZoom`, `ZoomList`, `ClampPan`, and both directions
+of the viewport/canvas mapping) is pure and unit-tested. It is the one part of the new UI that
+can be wrong arithmetically rather than visibly.
+
+## Stage 2 — per-portrait size
+
+Sizes are **64 and 128**. A third size was considered and dropped: it would have been another
+code path through every codec, test and migration for a marginal middle. The built-in Shared
+canvas is pinned at 64 on every client forever, which is what keeps it readable across addon
+versions.
+
+- `Canvas` takes size as a **required first argument** everywhere. A call site that forgets it
+  raises instead of quietly treating a 128 canvas as a 64 one — a silent coordinate scramble
+  is far worse than a visible error.
+- Ops stay **3 chars at size 64, byte-identical to v0.1**, and widen to 5 (two chars per axis,
+  12 bits, up to 4096) above it. Batch limits recompute per width: 76 ops at 3 chars, 48 at 5.
+- Size rides in `I` (invite), `S` (snapshot header) and `H` (hello). The invite parse is
+  strict, so an invite from an older addon fails to match rather than creating a canvas of the
+  wrong size and scrambling every op after it. A peer announcing a different size for the same
+  portrait gets a throttled warning — silent divergence is the thing worth avoiding.
+- A snapshot whose declared size differs from ours is rejected outright rather than
+  reinterpreted.
+
+## Stage 2 — Battle.net bulk transport
+
+`C_BattleNet.SendGameData` (formerly `BNSendGameData`) delivers addon data to a Battle.net
+friend's game account and carries **4078 bytes per message against the chat transport's 255**.
+A worst-case full canvas costs ~41 whispers over chat and 3 messages here; at 128x128 it is
+164 versus 9.
+
+The catch, documented by both Blizzard and ChatThrottleLib, is that Battle.net delivery is
+**explicitly not ordered**. So only snapshot chunks take this path: they are numbered `i of n`
+and reassembled by index, which makes ordering irrelevant to them. Everything whose meaning
+depends on sequence — paints, clears, locks, the echo linearization — stays on the ordered
+chat transport. Inbound Battle.net messages that are not snapshot chunks are dropped rather
+than trusted, so the unordered pipe cannot be used to smuggle a clear past the ordering rules.
+
+The whole path is feature-detected and falls back to chat: the API is resolved at call time,
+and the receive event is registered under `pcall` because registering an unknown event raises.
+
+## Testing
+
+`Core.lua` joined the desktop suite for the first time — it owns the upgrade path for canvases
+people have already painted, and nothing was exercising it. Stubbing `CreateFrame` to capture
+the event handler is enough to drive `ADDON_LOADED` and assert on real migrations: v1 to v2,
+sizeless portraits adopting 64, corrupt data being repaired, and cells past the canvas area
+being trimmed. It caught a load-breaking bug on its first run (`SanitizeCells` called without
+the new size argument, which would have raised on every login).
+
+## Accepted limits
+
+- Members of a >64 portrait all need v0.5+. Portrait ids are random, so older clients never
+  see new portraits uninvited, but an invitee on an old version cannot join one.
+- A non-Battle.net late joiner to a busy 128x128 still waits through a chat-rate snapshot;
+  that is the transport's floor, not something the addon can optimise away.
+- Canvases cannot be resized after creation.

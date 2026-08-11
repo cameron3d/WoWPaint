@@ -1,8 +1,9 @@
 # WoWPaint
 
 Collaborative pixel painting for **WoW Classic Era / Anniversary** (1.15.x). Paint a shared
-64×64 canvas with your guild or group, create invite-only **portraits** with friends on any
-realm you can whisper, **lock** finished pieces, and keep copies in your personal **gallery**.
+64×64 canvas with your guild or group, create invite-only **portraits** (up to 128×128) with
+friends on any realm you can whisper, **lock** finished pieces, and keep copies in your
+personal **gallery**.
 
 ## Install
 
@@ -35,6 +36,11 @@ realm you can whisper, **lock** finished pieces, and keep copies in your persona
 | **Nib** | Freehand width, 1–3 cells. |
 | **Undo** | Steps back through your last 20 actions. |
 | **Grid** | Cell guides — yours only, nobody else sees them. |
+| **Zoom** | 4/8/16/32 px per cell. Mouse wheel over the canvas also works. |
+
+**Zoom and pan.** The wheel zooms and keeps what's under the cursor in view; **middle-drag**
+pans when the canvas is bigger than the window. There's deliberately no zooming out past the
+point where the whole canvas fits — that would only shrink the picture inside a fixed frame.
 
 Shapes preview live while you drag and are only sent when you release, so sketching a box
 costs no traffic. Dragging past the edge clamps to it instead of cancelling. Undo repaints
@@ -51,7 +57,11 @@ Party, Guild.
 ## Portraits and invitations
 
 - **New** (or `/wowpaint new Sunset Over Orgrimmar`) creates a named portrait with you as its
-  creator and sole member.
+  creator and sole member. The Portraits panel has a **New size** toggle: **64×64** or
+  **128×128**, four times the area. The Shared canvas is always 64×64.
+- Everyone painting a 128×128 portrait needs the same addon version — older clients can't read
+  the wider coordinates. If someone's out of date you'll get a warning in chat rather than
+  silently mismatched art. The Shared canvas works across every version.
 - **Invite** (or `/wowpaint invite Thrall`) whispers an invitation — it prefills your current
   friendly target. The invitee gets an accept/decline popup; on accept they join the roster
   and receive the canvas automatically. Any member can invite others (up to 24 members).
@@ -83,7 +93,11 @@ Party, Guild.
   instance chat for the Shared canvas, whispers for portraits and sync). There is no server —
   every canvas lives in each player's SavedVariables and merges opportunistically.
 - Strokes batch every 0.5 s; all traffic is self-throttled well below the chat server's
-  tolerance, so it will not disconnect you. A full canvas syncs in at most ~40 whispers.
+  tolerance, so it will not disconnect you.
+- **Battle.net friends sync much faster.** Addon data sent to a BNet friend carries 4078 bytes
+  per message against chat's 255, so a full canvas takes ~3 messages instead of ~41. Only
+  snapshots use it — Battle.net delivery isn't ordered, so live strokes stay on the ordered
+  chat path where their sequence matters. Everyone else falls back to whispers automatically.
 - On login or opening a canvas, revision counters are compared and whoever is behind pulls a
   snapshot from whoever is ahead. Own broadcasts are reconciled against the chat channel's
   serialization order, so racing a clear against in-flight strokes converges.
@@ -97,7 +111,8 @@ Party, Guild.
 
 ## Development
 
-Pure-logic tests (codec, RLE, line drawing, ids, rosters, gallery) run on desktop Lua:
+Desktop tests cover the codecs, RLE, geometry, viewport maths, rosters, the inbound protocol
+trust rules, and the SavedVariables migration path:
 
 ```bash
 lua tests/run_tests.lua

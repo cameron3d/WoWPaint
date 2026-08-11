@@ -12,7 +12,9 @@ Comm.PREFIX = "WoWPaint"
 -- the ~800 B/s rate the chat server tolerates indefinitely.
 local QUEUE_INTERVAL = 0.35
 local FLUSH_INTERVAL = 0.5      -- how often locally painted pixels are sent
-local MAX_OPS_PER_MSG = 76      -- 3 chars per op after "B" + 6-char id, < 240
+-- Ops per batch, per op width: both land at <= 240 chars after the "B"
+-- and the 6-char portrait id, inside the 255-byte payload cap.
+local MAX_OPS = { [3] = 76, [5] = 48 }
 local SNAP_CHUNK = 200          -- snapshot data characters per whisper
 local OFFER_WINDOW = 3          -- seconds spent collecting snapshot offers
 local SYNC_TIMEOUT = 15         -- abort when chunks stall this long mid-transfer
@@ -23,11 +25,19 @@ local HELLO_MIN_INTERVAL = 60   -- per-portrait throttle for automatic hellos
 local OFFER_MIN_INTERVAL = 30   -- per-target throttle for snapshot offers
 local SNAP_MIN_INTERVAL = 30    -- per-requester throttle for snapshot streams
 local LOCK_NAG_INTERVAL = 30    -- per-sender throttle for "it's locked" replies
+local SIZE_WARN_INTERVAL = 300  -- per-sender throttle for canvas-size mismatch nags
 local INVITE_TTL = 120          -- seconds an outgoing invite stays honorable
 
 -- Each message type is only ever produced on one kind of channel; anything
 -- arriving elsewhere is forged (e.g. a whispered clear from a stranger).
 local BROADCAST_CHANNELS = { GUILD = true, PARTY = true, RAID = true, INSTANCE_CHAT = true }
+
+-- Resolved at call time, not load time: the name moved to C_BattleNet in
+-- later API versions and is absent entirely on clients without it, in which
+-- case everything falls back to the chat transport.
+local function BNetSender()
+    return (C_BattleNet and C_BattleNet.SendGameData) or BNSendGameData
+end
 
 Comm.queue = {}
 Comm.pendingOps = {}          -- locally painted ops awaiting send
@@ -39,6 +49,7 @@ Comm.lastOfferAt = {}         -- [pid..";"..sender] = time
 Comm.lastSnapAt = {}          -- [pid..";"..sender] = time
 Comm.lastRejectAt = {}        -- [pid..";"..sender] = time
 Comm.lastLockNagAt = {}       -- [pid..";"..sender] = time
+Comm.lastSizeWarnAt = {}      -- [pid..";"..sender] = time
 Comm.pendingInvites = {}      -- [pid..";"..target] = expiry time
 Comm.sync = nil               -- active inbound snapshot transfer {pid, source, ...}
 Comm.offerWindow = nil        -- open offer-collection window {pid, rev, sender}
@@ -126,7 +137,7 @@ function Comm:DrainQueue()
     -- our own B/C until the echo returns so races against remote clears can
     -- be resolved by the channel's total order (whispers never echo, so
     -- MEMBERS traffic is not tracked).
-    if item.chatType ~= "WHISPER" then
+    if BROADCAST_CHANNELS[item.chatType] then
         local kind = item.msg:sub(1, 1)
         if kind == "B" or kind == "C" then
             self.inflight[#self.inflight + 1] = {
@@ -138,7 +149,14 @@ function Comm:DrainQueue()
             }
         end
     end
-    C_ChatInfo.SendAddonMessage(self.PREFIX, item.msg, item.chatType, item.target)
+    if item.chatType == "BNET" then
+        local send = BNetSender()
+        if send then
+            send(item.target, self.PREFIX, item.msg)
+        end
+    else
+        C_ChatInfo.SendAddonMessage(self.PREFIX, item.msg, item.chatType, item.target)
+    end
     -- A send that silently failed never echoes; don't let its entry leak.
     while #self.inflight > 0 and GetTime() - self.inflight[1].at > 15 do
         table.remove(self.inflight, 1)
@@ -170,7 +188,7 @@ function Comm:OnOwnEcho(text)
             if e.kind == "C" then
                 local p = Portraits.Get(e.pid)
                 if p then
-                    Canvas.Clear(p.cells)
+                    Canvas.Clear(p.size, p.cells)
                     for j = i, #inflight do
                         local later = inflight[j]
                         if later.pid == e.pid and later.kind == "B" then
@@ -206,12 +224,11 @@ function Comm:Paint(p, x, y, color)
     if self.pendingPid and self.pendingPid ~= p.id then
         self:FlushPaintOps()
     end
-    if Canvas.SetPixel(p.cells, x, y, color) then
+    if Canvas.SetPixel(p.size, p.cells, x, y, color) then
         self.pendingPid = p.id
         WP.UI:UpdateCell(p, x, y)
-        self.pendingOps[#self.pendingOps + 1] =
-            WP.EncodeChar(x - 1) .. WP.EncodeChar(y - 1) .. WP.EncodeChar(color)
-        if #self.pendingOps >= MAX_OPS_PER_MSG then
+        self.pendingOps[#self.pendingOps + 1] = WP.EncodeOp(p.size, x, y, color)
+        if #self.pendingOps >= MAX_OPS[WP.OpWidth(p.size)] then
             self:FlushPaintOps()
         end
     end
@@ -246,13 +263,12 @@ end
 -- Apply a string of 3-character (x, y, color) triples. Input is untrusted;
 -- bad triples are skipped.
 function Comm:ApplyOps(p, ops)
-    for i = 1, #ops - 2, 3 do
-        local x = WP.DecodeChar(ops:sub(i, i))
-        local y = WP.DecodeChar(ops:sub(i + 1, i + 1))
-        local c = WP.DecodeChar(ops:sub(i + 2, i + 2))
-        if x and y and c and c < Canvas.NUM_COLORS then
-            if Canvas.SetPixel(p.cells, x + 1, y + 1, c) then
-                WP.UI:UpdateCell(p, x + 1, y + 1)
+    local width = WP.OpWidth(p.size)
+    for i = 1, #ops - width + 1, width do
+        local x, y, c = WP.DecodeOp(p.size, ops, i)
+        if x and c < Canvas.NUM_COLORS then
+            if Canvas.SetPixel(p.size, p.cells, x, y, c) then
+                WP.UI:UpdateCell(p, x, y)
             end
         end
     end
@@ -275,7 +291,7 @@ function Comm:SendClear(p)
         self.pendingOps = {}
         self.pendingPid = nil
     end
-    Canvas.Clear(p.cells)
+    Canvas.Clear(p.size, p.cells)
     p.rev = p.rev + 1
     WP.UI:RedrawAll()
     self:Send(p, "C" .. p.id)
@@ -355,7 +371,7 @@ function Comm:SendHello(p, force)
     if not force and last and now - last < HELLO_MIN_INTERVAL then
         return false
     end
-    local sent = self:Send(p, "H" .. p.id .. ":" .. p.rev .. ":" .. WP.VERSION)
+    local sent = self:Send(p, "H" .. p.id .. ":" .. p.rev .. ":" .. WP.VERSION .. ":" .. p.size)
     if sent then
         self.lastHelloAt[p.id] = now
     end
@@ -366,6 +382,28 @@ function Comm:HelloAll(force)
     for _, p in ipairs(Portraits.List()) do
         self:SendHello(p, force)
     end
+end
+
+-- A peer announcing a different size for the same portrait id is running an
+-- addon version that disagrees with ours about it. Ops would decode into
+-- nonsense, so say so once in a while rather than silently scribbling.
+function Comm:WarnSizeMismatch(p, theirSize, sender)
+    if theirSize == p.size then
+        return
+    end
+    if theirSize == nil and p.size == Canvas.DEFAULT_SIZE then
+        return -- an older client on a 64 canvas is fully compatible
+    end
+    local now = GetTime()
+    local key = p.id .. ";" .. sender
+    local last = self.lastSizeWarnAt[key]
+    if last and now - last < SIZE_WARN_INTERVAL then
+        return
+    end
+    self.lastSizeWarnAt[key] = now
+    WP.Print(("%s sees '%s' as a %s canvas, you see %d. They need the same addon version; paint will not line up until then."):format(
+        Ambiguate(sender, "short"), p.name,
+        theirSize and (theirSize .. "x" .. theirSize) or "64x64 (older version)", p.size))
 end
 
 function Comm:OnHello(p, rev, sender)
@@ -487,7 +525,7 @@ function Comm:ReplayBuffered()
         local p = Portraits.Get(ev.pid)
         if p then
             if ev.clear then
-                Canvas.Clear(p.cells)
+                Canvas.Clear(p.size, p.cells)
                 -- Our batches that were unechoed when this clear arrived
                 -- were serialized after it; peers kept them.
                 for _, ops in ipairs(ev.reapply or {}) do
@@ -502,13 +540,92 @@ function Comm:ReplayBuffered()
     end
 end
 
+----------------------------------------------------------------------
+-- Battle.net bulk transport (snapshots only)
+--
+-- Addon data can also be sent straight to a Battle.net friend's game
+-- account, which carries up to 4078 bytes per message against the chat
+-- transport's 255. A full canvas that costs ~41 whispers costs 3 messages
+-- here, which is what makes big canvases practical.
+--
+-- The catch is that Battle.net delivery is explicitly NOT ordered. Only
+-- snapshot chunks ride this path: they are numbered "i of n" and reassembled
+-- by index, so order is irrelevant to them. Everything whose meaning depends
+-- on sequence -- paints, clears, locks -- stays on the ordered chat
+-- transport, and inbound BNet messages that are not snapshot chunks are
+-- dropped rather than trusted.
+----------------------------------------------------------------------
+
+local BNET_CHUNK = 3900 -- leaves room for the header inside the 4078 cap
+
+-- The game account of a roster member who is also an online Battle.net
+-- friend playing WoW, or nil. Realm names carry spaces in this API and never
+-- do in ours.
+function Comm:BNetAccountFor(fullName)
+    if not BNetSender() or not C_BattleNet or not BNGetNumFriends then
+        return nil
+    end
+    for i = 1, BNGetNumFriends() do
+        local accounts = C_BattleNet.GetFriendNumGameAccounts
+            and C_BattleNet.GetFriendNumGameAccounts(i) or 0
+        for j = 1, accounts do
+            local g = C_BattleNet.GetFriendGameAccountInfo(i, j)
+            if g and g.isOnline and g.clientProgram == "WoW" and g.characterName then
+                local realm = g.realmName and g.realmName:gsub("%s", "") or nil
+                local full = realm and (g.characterName .. "-" .. realm) or g.characterName
+                if full == fullName then
+                    return g.gameAccountID
+                end
+            end
+        end
+    end
+    return nil
+end
+
+local function BNetNameFor(gameAccountID)
+    local info = C_BattleNet and C_BattleNet.GetGameAccountInfoByID
+        and C_BattleNet.GetGameAccountInfoByID(gameAccountID)
+    if not info or not info.characterName then
+        return nil
+    end
+    local realm = info.realmName and info.realmName:gsub("%s", "") or nil
+    return realm and (info.characterName .. "-" .. realm) or info.characterName
+end
+
+function Comm:OnBNetMessage(prefix, text, _, gameAccountID)
+    if prefix ~= self.PREFIX or type(text) ~= "string" then
+        return
+    end
+    -- Snapshot chunks only. Anything else arriving here is either a bug or
+    -- someone trying to smuggle an ordering-sensitive message onto an
+    -- unordered pipe.
+    if text:sub(1, 1) ~= "S" then
+        return
+    end
+    local sender = BNetNameFor(gameAccountID)
+    if not sender then
+        return
+    end
+    -- Re-enter the normal path as a whisper so every trust rule still applies.
+    self:OnMessage(prefix, text, "WHISPER", sender)
+end
+
 function Comm:StreamSnapshot(p, target)
-    local data = Canvas.Serialize(p.cells)
-    local total = math.ceil(#data / SNAP_CHUNK)
+    local data = Canvas.Serialize(p.size, p.cells)
     local flag = p.locked and "L" or "U"
+    -- A Battle.net friend gets the whole thing in a handful of messages
+    -- instead of dozens of whispers.
+    local account = self:BNetAccountFor(target)
+    local chunkSize = account and BNET_CHUNK or SNAP_CHUNK
+    local total = math.ceil(#data / chunkSize)
     for i = 1, total do
-        local chunk = data:sub((i - 1) * SNAP_CHUNK + 1, i * SNAP_CHUNK)
-        self:Whisper(("S%s:%d:%d:%d:%s:%s"):format(p.id, i, total, p.rev, flag, chunk), target)
+        local chunk = data:sub((i - 1) * chunkSize + 1, i * chunkSize)
+        local msg = ("S%s:%d:%d:%d:%s:%d:%s"):format(p.id, i, total, p.rev, flag, p.size, chunk)
+        if account then
+            self:Enqueue(msg, "BNET", account)
+        else
+            self:Whisper(msg, target)
+        end
     end
 end
 
@@ -536,15 +653,15 @@ function Comm:OnSnapshotChunk(p, rest, sender)
     if not s or s.pid ~= p.id or sender ~= s.source then
         return
     end
-    local i, n, rev, flag, data = rest:match("^:(%d+):(%d+):(%d+):([LU]):(.*)$")
-    i, n, rev = tonumber(i), tonumber(n), tonumber(rev)
-    if not i or not n or not rev or n < 1 or i < 1 or i > n then
+    local i, n, rev, flag, size, data = rest:match("^:(%d+):(%d+):(%d+):([LU]):(%d+):(.*)$")
+    i, n, rev, size = tonumber(i), tonumber(n), tonumber(rev), tonumber(size)
+    if not i or not n or not rev or n < 1 or i < 1 or i > n or not Canvas.ValidSize(size) then
         return
     end
-    if s.total and (n ~= s.total or rev ~= s.rev) then
+    if s.total and (n ~= s.total or rev ~= s.rev or size ~= s.size) then
         return
     end
-    s.total, s.rev = n, rev
+    s.total, s.rev, s.size = n, rev, size
     s.locked = (flag == "L")
     if not s.chunks[i] then
         s.chunks[i] = data
@@ -565,9 +682,12 @@ function Comm:FinishSync()
     self.sync = nil
     local p = Portraits.Get(s.pid)
     if p then
-        local cells = Canvas.Deserialize(table.concat(s.chunks))
+        -- Decode against the size the sender declared, not ours: a snapshot
+        -- for a differently-sized canvas must be rejected outright rather
+        -- than reinterpreted into a scrambled picture.
+        local cells = (s.size == p.size) and Canvas.Deserialize(p.size, table.concat(s.chunks)) or nil
         if cells then
-            for i = 1, Canvas.NUM_CELLS do
+            for i = 1, Canvas.Cells(p.size) do
                 p.cells[i] = cells[i]
             end
             p.rev = math.max(p.rev, s.rev)
@@ -629,7 +749,7 @@ function Comm:SendInvite(p, target)
         end
     end
     self.pendingInvites[p.id .. ";" .. target] = now + INVITE_TTL
-    self:Whisper("I" .. p.id .. ":" .. (p.owner or "") .. ":" .. p.name, target)
+    self:Whisper("I" .. p.id .. ":" .. (p.owner or "") .. ":" .. p.size .. ":" .. p.name, target)
     return true
 end
 
@@ -637,8 +757,12 @@ function Comm:OnInvite(id, rest, sender)
     if Portraits.Get(id) then
         return -- we already have this portrait
     end
-    local owner, name = rest:match("^:(.-):(.*)$")
-    if not owner then
+    -- Strict: an invite from an older addon has no size field and will not
+    -- match, which is what we want -- it would create a canvas of the wrong
+    -- size and scramble every op that followed.
+    local owner, size, name = rest:match("^:(.-):(%d+):(.*)$")
+    size = tonumber(size)
+    if not owner or not Canvas.ValidSize(size) then
         return
     end
     name = Portraits.SanitizeName(name)
@@ -648,6 +772,7 @@ function Comm:OnInvite(id, rest, sender)
     WP.UI:ShowInvitePopup({
         id = id,
         name = name,
+        size = size,
         owner = WP.NormalizeName(owner ~= "" and owner or sender),
         from = sender,
     })
@@ -658,7 +783,7 @@ function Comm:AcceptInvite(data)
     if Portraits.Get(data.id) then
         return
     end
-    local p = Portraits.Create(data.name, "MEMBERS", data.id, data.owner)
+    local p = Portraits.Create(data.name, "MEMBERS", data.id, data.owner, data.size)
     -- Roster stub: us, the inviter, and the owner. The full roster arrives
     -- in the inviter's M message moments later. Built by appending rather
     -- than as a literal: a nil in the middle would truncate the ipairs walk
@@ -954,7 +1079,7 @@ function Comm:OnMessage(prefix, text, channel, sender)
     end
 
     if kind == "B" then
-        if #rest == 0 or #rest % 3 ~= 0 then
+        if #rest == 0 or #rest % WP.OpWidth(p.size) ~= 0 then
             return
         end
         if p.locked then
@@ -992,7 +1117,7 @@ function Comm:OnMessage(prefix, text, channel, sender)
             self.bufferedEvents[#self.bufferedEvents + 1] =
                 { pid = p.id, clear = true, reapply = reapply }
         else
-            Canvas.Clear(p.cells)
+            Canvas.Clear(p.size, p.cells)
             p.rev = p.rev + 1
             -- Our own unechoed batches were serialized after this clear;
             -- peers keep them, so must we.
@@ -1003,7 +1128,12 @@ function Comm:OnMessage(prefix, text, channel, sender)
         WP.Print(Ambiguate(sender, "short") .. " cleared portrait '" .. p.name .. "'.")
     elseif kind == "H" then
         local rev = tonumber(rest:match("^:(%d+)"))
+        -- Matched strictly against the whole tail, so an older client's
+        -- "H<id>:<rev>:<version>" yields nil rather than a digit scavenged
+        -- out of its version string.
+        local theirSize = tonumber(rest:match("^:%d+:[^:]*:(%d+)$"))
         if rev then
+            self:WarnSizeMismatch(p, theirSize, sender)
             self:OnHello(p, rev, sender)
         end
     elseif kind == "Q" then

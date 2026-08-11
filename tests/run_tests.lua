@@ -68,16 +68,14 @@ check(not unsafe, "alphabet contains only safe printable characters")
 
 -- RLE codec ----------------------------------------------------------------
 
-local blank = {}
-for i = 1, Canvas.NUM_CELLS do
-    blank[i] = 0
-end
-local data = Canvas.Serialize(blank)
+local SZ = Canvas.DEFAULT_SIZE
+local blank = Canvas.New(SZ)
+local data = Canvas.Serialize(SZ, blank)
 check(#data == 128, "blank canvas serializes to 128 chars (64 max-runs)")
-local back = Canvas.Deserialize(data)
+local back = Canvas.Deserialize(SZ, data)
 ok = back ~= nil
 if ok then
-    for i = 1, Canvas.NUM_CELLS do
+    for i = 1, Canvas.Cells(SZ) do
         if back[i] ~= blank[i] then
             ok = false
         end
@@ -87,14 +85,14 @@ check(ok, "blank canvas round-trips")
 
 math.randomseed(42)
 local noisy = {}
-for i = 1, Canvas.NUM_CELLS do
+for i = 1, Canvas.Cells(SZ) do
     noisy[i] = math.random(0, Canvas.NUM_COLORS - 1)
 end
-data = Canvas.Serialize(noisy)
-back = Canvas.Deserialize(data)
+data = Canvas.Serialize(SZ, noisy)
+back = Canvas.Deserialize(SZ, data)
 ok = back ~= nil
 if ok then
-    for i = 1, Canvas.NUM_CELLS do
+    for i = 1, Canvas.Cells(SZ) do
         if back[i] ~= noisy[i] then
             ok = false
         end
@@ -103,28 +101,39 @@ end
 check(ok, "noisy canvas round-trips")
 check(#data % 2 == 0, "serialized form has even length")
 
-check(Canvas.Deserialize(nil) == nil, "Deserialize rejects nil")
-check(Canvas.Deserialize("abc") == nil, "Deserialize rejects odd length")
-check(Canvas.Deserialize("!!") == nil, "Deserialize rejects unknown chars")
-check(Canvas.Deserialize("0G") == nil, "Deserialize rejects color >= 16")
-check(Canvas.Deserialize(data .. "00") == nil, "Deserialize rejects cell overflow")
-check(Canvas.Deserialize(data:sub(1, #data - 2)) == nil, "Deserialize rejects short payloads")
+check(Canvas.Deserialize(SZ, nil) == nil, "Deserialize rejects nil")
+check(Canvas.Deserialize(SZ, "abc") == nil, "Deserialize rejects odd length")
+check(Canvas.Deserialize(SZ, "!!") == nil, "Deserialize rejects unknown chars")
+check(Canvas.Deserialize(SZ, "0G") == nil, "Deserialize rejects color >= 16")
+check(Canvas.Deserialize(SZ, data .. "00") == nil, "Deserialize rejects cell overflow")
+check(Canvas.Deserialize(SZ, data:sub(1, #data - 2)) == nil, "Deserialize rejects short payloads")
 
 -- SetPixel bounds ----------------------------------------------------------
 
-local cells = {}
-for i = 1, Canvas.NUM_CELLS do
-    cells[i] = 0
-end
-check(Canvas.SetPixel(cells, 1, 1, 5) == true, "SetPixel changes a cell")
-check(Canvas.SetPixel(cells, 1, 1, 5) == false, "SetPixel no-ops on same color")
-check(Canvas.SetPixel(cells, 0, 1, 5) == false, "SetPixel rejects x < 1")
-check(Canvas.SetPixel(cells, 65, 1, 5) == false, "SetPixel rejects x > 64")
-check(Canvas.SetPixel(cells, 1, 0, 5) == false, "SetPixel rejects y < 1")
-check(Canvas.SetPixel(cells, 1, 65, 5) == false, "SetPixel rejects y > 64")
-check(Canvas.SetPixel(cells, 1, 2, 16) == false, "SetPixel rejects color >= 16")
-check(Canvas.SetPixel(cells, 1, 2, -1) == false, "SetPixel rejects color < 0")
-check(Canvas.GetPixel(cells, 1, 1) == 5, "GetPixel reads back the value")
+local cells = Canvas.New(SZ)
+check(Canvas.SetPixel(SZ, cells, 1, 1, 5) == true, "SetPixel changes a cell")
+check(Canvas.SetPixel(SZ, cells, 1, 1, 5) == false, "SetPixel no-ops on same color")
+check(Canvas.SetPixel(SZ, cells, 0, 1, 5) == false, "SetPixel rejects x < 1")
+check(Canvas.SetPixel(SZ, cells, 65, 1, 5) == false, "SetPixel rejects x > 64")
+check(Canvas.SetPixel(SZ, cells, 1, 0, 5) == false, "SetPixel rejects y < 1")
+check(Canvas.SetPixel(SZ, cells, 1, 65, 5) == false, "SetPixel rejects y > 64")
+check(Canvas.SetPixel(SZ, cells, 1, 2, 16) == false, "SetPixel rejects color >= 16")
+check(Canvas.SetPixel(SZ, cells, 1, 2, -1) == false, "SetPixel rejects color < 0")
+check(Canvas.GetPixel(SZ, cells, 1, 1) == 5, "GetPixel reads back the value")
+
+-- A 128 canvas must not be readable as a 64 one, and vice versa.
+local big = Canvas.New(128)
+check(Canvas.Cells(128) == 16384, "a 128 canvas has 16384 cells")
+check(Canvas.SetPixel(128, big, 100, 100, 7) == true, "SetPixel reaches past 64 on a 128 canvas")
+check(Canvas.SetPixel(SZ, big, 100, 100, 7) == false, "the same cell is out of bounds at size 64")
+check(Canvas.Index(128, 1, 2) == 129 and Canvas.Index(64, 1, 2) == 65,
+    "Index strides by the canvas size")
+local bigData = Canvas.Serialize(128, big)
+check(Canvas.Deserialize(128, bigData) ~= nil, "a 128 snapshot round-trips at 128")
+check(Canvas.Deserialize(64, bigData) == nil, "a 128 snapshot is rejected as a 64 canvas")
+check(Canvas.Deserialize(128, data) == nil, "a 64 snapshot is rejected as a 128 canvas")
+check(Canvas.ValidSize(64) and Canvas.ValidSize(128) and not Canvas.ValidSize(96)
+    and not Canvas.ValidSize(nil), "ValidSize admits exactly the supported sizes")
 
 -- Bresenham ----------------------------------------------------------------
 
@@ -155,6 +164,53 @@ for i = 2, #pts do
     end
 end
 check(ok, "ForLine is contiguous with correct endpoints on a diagonal")
+
+-- Paint op codec -------------------------------------------------------------
+
+check(WP.OpWidth(64) == 3 and WP.OpWidth(128) == 5, "op width follows the canvas size")
+
+-- The 64 encoding must stay byte-for-byte what earlier versions emit, or the
+-- Shared canvas stops being readable across versions.
+check(WP.EncodeOp(64, 1, 1, 0) == WP.EncodeChar(0) .. WP.EncodeChar(0) .. WP.EncodeChar(0),
+    "the 3-char encoding is unchanged")
+check(#WP.EncodeOp(64, 64, 64, 15) == 3 and #WP.EncodeOp(128, 1, 1, 0) == 5,
+    "ops are 3 chars at size 64 and 5 above it")
+
+ok = true
+for _, size in ipairs(Canvas.SIZES) do
+    for _, pt in ipairs({ { 1, 1, 0 }, { size, size, 15 }, { 1, size, 7 }, { size, 1, 3 },
+        { 65, 100, 9 }, { 33, 17, 5 } }) do
+        local x, y, c = pt[1], pt[2], pt[3]
+        if x <= size and y <= size then
+            local dx, dy, dc = WP.DecodeOp(size, WP.EncodeOp(size, x, y, c), 1)
+            if dx ~= x or dy ~= y or dc ~= c then
+                ok = false
+            end
+        end
+    end
+end
+check(ok, "every op round-trips at both widths, including past 64")
+
+check(WP.DecodeOp(128, "aa", 1) == nil, "DecodeOp rejects a truncated wide op")
+check(WP.DecodeOp(64, "a|a", 1) == nil, "DecodeOp rejects characters off the alphabet")
+
+-- A batch must stay inside the 255-byte payload with the kind byte and id.
+check(1 + 6 + 76 * 3 <= 240 and 1 + 6 + 48 * 5 <= 247,
+    "both batch limits fit the addon message cap")
+
+-- Invite and snapshot headers carry the size --------------------------------
+
+local iowner2, isize, iname = ("Iaabbcc:Owner-Testrealm:128:Fan: Art"):sub(8)
+    :match("^:(.-):(%d+):(.*)$")
+check(iowner2 == "Owner-Testrealm" and tonumber(isize) == 128 and iname == "Fan: Art",
+    "invite parsing splits owner, size and a name containing colons")
+check(("Iaabbcc:Owner-Testrealm:Fan Art"):sub(8):match("^:(.-):(%d+):(.*)$") == nil,
+    "an invite without a size field is rejected rather than misread")
+
+local sh = ("Saabbcc:3:41:1234:L:128:0A0B"):sub(8)
+local si, sn, srev, sflag, ssize, sdata = sh:match("^:(%d+):(%d+):(%d+):([LU]):(%d+):(.*)$")
+check(tonumber(si) == 3 and tonumber(sn) == 41 and tonumber(srev) == 1234 and sflag == "L"
+    and tonumber(ssize) == 128 and sdata == "0A0B", "S header carries size alongside the lock flag")
 
 -- Viewport mapping -----------------------------------------------------------
 
@@ -345,30 +401,32 @@ check(#pts == 1, "ForEllipse degenerates to a single cell")
 
 -- Flood fill -----------------------------------------------------------------
 
-local fillCells = {}
-for i = 1, Canvas.NUM_CELLS do
-    fillCells[i] = 0
-end
-check(Canvas.FloodFill(fillCells, 1, 1, function() end) == Canvas.NUM_CELLS,
+local fillCells = Canvas.New(SZ)
+check(Canvas.FloodFill(SZ, fillCells, 1, 1, function() end) == Canvas.Cells(SZ),
     "FloodFill covers a blank canvas exactly once")
 -- Wall down column 32 splits the canvas; the left region is 31 columns wide.
-for y = 1, Canvas.SIZE do
-    fillCells[Canvas.Index(32, y)] = 5
+for y = 1, SZ do
+    fillCells[Canvas.Index(SZ, 32, y)] = 5
 end
-check(Canvas.FloodFill(fillCells, 1, 1, function() end) == 31 * Canvas.SIZE,
+check(Canvas.FloodFill(SZ, fillCells, 1, 1, function() end) == 31 * SZ,
     "FloodFill stops at a colour boundary")
-check(Canvas.FloodFill(fillCells, 32, 1, function() end) == Canvas.SIZE,
+check(Canvas.FloodFill(SZ, fillCells, 32, 1, function() end) == SZ,
     "FloodFill follows the wall itself")
-check(Canvas.FloodFill(fillCells, 0, 1, function() end) == 0, "FloodFill rejects out-of-bounds seeds")
+check(Canvas.FloodFill(SZ, fillCells, 0, 1, function() end) == 0,
+    "FloodFill rejects out-of-bounds seeds")
+check(Canvas.FloodFill(128, Canvas.New(128), 1, 1, function() end) == 16384,
+    "FloodFill spans a whole 128 canvas")
 
 ok = true
-for _, i in ipairs({ 1, 64, 65, 2048, Canvas.NUM_CELLS }) do
-    local x, y = Canvas.Coords(i)
-    if Canvas.Index(x, y) ~= i then
-        ok = false
+for _, size in ipairs(Canvas.SIZES) do
+    for _, i in ipairs({ 1, size, size + 1, Canvas.Cells(size) }) do
+        local x, y = Canvas.Coords(size, i)
+        if Canvas.Index(size, x, y) ~= i then
+            ok = false
+        end
     end
 end
-check(ok, "Canvas.Coords inverts Canvas.Index")
+check(ok, "Canvas.Coords inverts Canvas.Index at every size")
 
 -- Snapshot header with lock flag ---------------------------------------------
 
@@ -465,11 +523,11 @@ check(not wire.locked, "the owner can unlock the portrait")
 
 -- Locked canvases drop inbound paint, and only the owner answers with a nag.
 wire.locked = true
-local before = wire.cells[Canvas.Index(1, 1)]
+local before = wire.cells[Canvas.Index(wire.size, 1, 1)]
 Comm.queue = {}
 Comm:OnMessage("WoWPaint", "Baaaaaa" .. WP.EncodeChar(0) .. WP.EncodeChar(0) .. WP.EncodeChar(5),
     "WHISPER", OTHER)
-check(wire.cells[Canvas.Index(1, 1)] == before, "paint on a locked portrait is dropped")
+check(wire.cells[Canvas.Index(wire.size, 1, 1)] == before, "paint on a locked portrait is dropped")
 check(sent("Laaaaaa") == nil, "a non-owner does not nag stale painters (its L is ignored anyway)")
 wire.locked = false
 
@@ -499,6 +557,18 @@ Portraits.AddMembers(notMine, { OWNER, "Me-Testrealm", "Ann-Testrealm" })
 check(not Comm:SendKick(notMine, "Ann-Testrealm"),
     "a plain member cannot uninvite anyone")
 
+-- Battle.net carries snapshots only, and never ordering-sensitive messages.
+local bnetPortrait = newShared("ffffff", OWNER, { OWNER, "Me-Testrealm" })
+bnetPortrait.rev = 3
+Comm.queue = {}
+-- A clear smuggled onto the unordered pipe must be ignored outright.
+Comm:OnBNetMessage("WoWPaint", "Cffffff", "WHISPER", 1234)
+check(bnetPortrait.rev == 3, "a clear arriving over Battle.net is dropped")
+Comm:OnBNetMessage("WoWPaint", "Bffffff" .. WP.EncodeOp(64, 1, 1, 5), "WHISPER", 1234)
+check(bnetPortrait.cells[Canvas.Index(64, 1, 1)] == 0, "paint arriving over Battle.net is dropped")
+check(not Comm:BNetAccountFor(OWNER),
+    "with no Battle.net API present, snapshots fall back to the chat transport")
+
 -- Batches are un-counted once each when a remote clear drops them, even when
 -- two batches carry byte-identical ops.
 local rev = Portraits.Create("Rev", "MEMBERS", "eeeeee", "Me-Testrealm")
@@ -512,6 +582,102 @@ check(#Comm.queue == 4, "a MEMBERS batch is queued once per other member")
 Comm:DropQueuedPaints("eeeeee")
 check(#Comm.queue == 0, "a remote clear drops every queued copy")
 check(rev.rev == 0, "each dropped batch un-counts exactly one revision")
+
+-- SavedVariables migration and sanitising --------------------------------
+--
+-- Core owns the upgrade path for canvases people have already painted, so it
+-- is worth driving for real rather than trusting it. Loading it needs a few
+-- more stubs, and the ADDON_LOADED handler is the only way in: InitDB is a
+-- local.
+
+local eventHandler
+DEFAULT_CHAT_FRAME = { AddMessage = function() end }
+SlashCmdList = {}
+StaticPopup_Show = function() end
+CreateFrame = function()
+    return {
+        RegisterEvent = function() end,
+        SetScript = function(_, which, fn)
+            if which == "OnEvent" then
+                eventHandler = fn
+            end
+        end,
+    }
+end
+
+loadModule("Core.lua")
+check(type(eventHandler) == "function", "Core installs an event handler")
+
+local function migrate(saved)
+    WoWPaintDB = saved
+    eventHandler(nil, "ADDON_LOADED", "WoWPaint")
+    return WP.db
+end
+
+-- A v1 database: one flat canvas, no portraits at all.
+local v1cells = Canvas.New(64)
+v1cells[Canvas.Index(64, 5, 5)] = 9
+local db = migrate({ dbVersion = 1, cells = v1cells, rev = 12, channel = "GUILD" })
+local shared = db.portraits[Portraits.SHARED_ID]
+check(db.dbVersion == 2, "the database is upgraded to v2")
+check(shared ~= nil and shared.rev == 12 and shared.dist == "GUILD",
+    "the old canvas becomes the Shared portrait, keeping its revision and scope")
+check(shared.cells[Canvas.Index(64, 5, 5)] == 9, "painted pixels survive the migration")
+check(shared.size == 64, "the Shared canvas is size 64")
+check(db.cells == nil and db.rev == nil, "the v1 fields are cleared")
+
+-- Portraits saved before per-portrait sizes existed.
+db = migrate({
+    dbVersion = 2,
+    portraits = {
+        ["000000"] = { name = "Shared", dist = "AUTO", cells = Canvas.New(64), rev = 1 },
+        ["abcdef"] = { name = "Old", dist = "MEMBERS", cells = Canvas.New(64), rev = 2,
+            owner = "Owner-Testrealm", members = { "Owner-Testrealm" } },
+    },
+    gallery = { { name = "Keep", cells = Canvas.New(64), savedAt = 0 } },
+})
+check(db.portraits["abcdef"].size == 64, "a sizeless portrait is adopted as 64")
+check(db.gallery[1].size == 64, "a sizeless gallery entry is adopted as 64")
+
+-- Junk must be repaired, not propagated, and a 128 canvas must survive.
+local bigCells = Canvas.New(128)
+bigCells[Canvas.Index(128, 100, 100)] = 11
+bigCells[7] = "not a colour"
+db = migrate({
+    dbVersion = 2,
+    portraits = {
+        ["000000"] = { name = "Shared", dist = "NONSENSE", cells = Canvas.New(64), rev = -5,
+            size = 128, locked = true },
+        ["bigpor"] = { name = "Big", dist = "MEMBERS", cells = bigCells, rev = 3, size = 128,
+            owner = "Owner-Testrealm", members = { "Owner-Testrealm", "|cffBad-Realm" } },
+        ["!!bad!"] = { name = "Bogus", cells = Canvas.New(64) },
+    },
+    gallery = { "not a table", { name = "", cells = Canvas.New(64) } },
+})
+check(db.portraits["000000"].size == 64,
+    "the Shared canvas is forced back to 64 however it was stored")
+check(db.portraits["000000"].dist == "AUTO" and db.portraits["000000"].rev == 0
+    and db.portraits["000000"].locked == false, "a corrupt Shared portrait is repaired")
+check(db.portraits["!!bad!"] == nil, "a portrait under an invalid id is dropped")
+local bigp = db.portraits["bigpor"]
+check(bigp and bigp.size == 128 and bigp.cells[Canvas.Index(128, 100, 100)] == 11,
+    "a 128 portrait keeps its size and its pixels")
+check(bigp.cells[7] == 0, "a non-numeric cell is repaired to the background colour")
+check(#bigp.members == 1, "a roster name carrying chat escapes is dropped on load")
+check(#db.gallery == 1 and db.gallery[1].name == "Untitled",
+    "gallery junk is dropped and unnamed entries are labelled")
+
+-- Cells past the end of a canvas must not linger: Serialize would read them.
+local overlong = Canvas.New(64)
+for i = Canvas.Cells(64) + 1, Canvas.Cells(64) + 50 do
+    overlong[i] = 3
+end
+db = migrate({
+    dbVersion = 2,
+    portraits = { ["000000"] = { name = "Shared", dist = "AUTO", cells = overlong, rev = 0 } },
+})
+check(#db.portraits["000000"].cells == Canvas.Cells(64),
+    "cells past the canvas area are trimmed on load")
 
 --------------------------------------------------------------------------
 

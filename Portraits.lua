@@ -59,21 +59,15 @@ function Portraits.ValidMemberName(name)
     return not name:find("^[-+]") and not name:find("[|,:%c]")
 end
 
-function Portraits.NewCells()
-    local cells = {}
-    for i = 1, Canvas.NUM_CELLS do
-        cells[i] = 0
-    end
-    return cells
-end
-
-function Portraits.Create(name, dist, id, owner)
+function Portraits.Create(name, dist, id, owner, size)
+    size = Canvas.ValidSize(size) and size or Canvas.DEFAULT_SIZE
     local p = {
         id = id or Portraits.GenerateId(),
         name = Portraits.SanitizeName(name),
         dist = dist or "MEMBERS",
         owner = owner,
-        cells = Portraits.NewCells(),
+        size = size,
+        cells = Canvas.New(size),
         rev = 0,
         locked = false,
         lockedBy = nil,
@@ -258,13 +252,15 @@ end
 ----------------------------------------------------------------------
 
 function Portraits.SaveToGallery(p, name)
+    local size = p.size or Canvas.DEFAULT_SIZE
     local cells = {}
-    for i = 1, Canvas.NUM_CELLS do
+    for i = 1, Canvas.Cells(size) do
         cells[i] = p.cells[i]
     end
     local entry = {
         name = Portraits.SanitizeName(name and name ~= "" and name or p.name),
         cells = cells,
+        size = size,
         savedAt = time(),
         source = p.name,
     }

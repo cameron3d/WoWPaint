@@ -1,6 +1,6 @@
 local ADDON_NAME, WP = ...
 
-WP.VERSION = "0.4.1"
+WP.VERSION = "0.5.0"
 
 -- 64-character alphabet used for compact wire encoding. Every character is
 -- safe inside an addon message payload (printable ASCII, no "|", no ":",
@@ -88,6 +88,53 @@ function WP.ForEllipse(x0, y0, x1, y1, filled, fn)
             end
         end
     end
+end
+
+----------------------------------------------------------------------
+-- Paint op codec
+--
+-- A coordinate fits in one alphabet character up to 64, which is why the
+-- original canvas is that size. Larger canvases spend two characters per
+-- axis (12 bits, up to 4096), so ops are 5 characters instead of 3. Small
+-- canvases keep the original 3-char encoding byte for byte, which is what
+-- lets the Shared canvas stay readable by every version of the addon.
+----------------------------------------------------------------------
+
+function WP.OpWidth(size)
+    return size <= 64 and 3 or 5
+end
+
+function WP.EncodeOp(size, x, y, color)
+    if size <= 64 then
+        return WP.EncodeChar(x - 1) .. WP.EncodeChar(y - 1) .. WP.EncodeChar(color)
+    end
+    local px, py = x - 1, y - 1
+    return WP.EncodeChar(math.floor(px / 64)) .. WP.EncodeChar(px % 64)
+        .. WP.EncodeChar(math.floor(py / 64)) .. WP.EncodeChar(py % 64)
+        .. WP.EncodeChar(color)
+end
+
+-- Decode the op starting at position i. Returns 1-based x, y and the colour,
+-- or nil for anything malformed. Input is untrusted.
+function WP.DecodeOp(size, ops, i)
+    if size <= 64 then
+        local x = WP.DecodeChar(ops:sub(i, i))
+        local y = WP.DecodeChar(ops:sub(i + 1, i + 1))
+        local c = WP.DecodeChar(ops:sub(i + 2, i + 2))
+        if not x or not y or not c then
+            return nil
+        end
+        return x + 1, y + 1, c
+    end
+    local xh = WP.DecodeChar(ops:sub(i, i))
+    local xl = WP.DecodeChar(ops:sub(i + 1, i + 1))
+    local yh = WP.DecodeChar(ops:sub(i + 2, i + 2))
+    local yl = WP.DecodeChar(ops:sub(i + 3, i + 3))
+    local c = WP.DecodeChar(ops:sub(i + 4, i + 4))
+    if not xh or not xl or not yh or not yl or not c then
+        return nil
+    end
+    return xh * 64 + xl + 1, yh * 64 + yl + 1, c
 end
 
 ----------------------------------------------------------------------

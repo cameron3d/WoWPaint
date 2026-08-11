@@ -1,7 +1,7 @@
 ## Interface: 11507
 ## Title: WoWPaint
-## Notes: Collaborative pixel painting: shared canvases, invite-only portraits, and a gallery.
-## Version: 0.4.1
+## Notes: Collaborative pixel painting: shared canvases, invite-only portraits, drawing tools, and a gallery.
+## Version: 0.5.0
 ## SavedVariables: WoWPaintDB
 ## X-Website: https://github.com/cameron3d/WoWPaint
 ## X-Category: Miscellaneous

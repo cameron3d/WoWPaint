@@ -9,23 +9,21 @@ function WP.Print(msg)
     DEFAULT_CHAT_FRAME:AddMessage("|cff7ec0eeWoWPaint:|r " .. tostring(msg))
 end
 
-local function FreshCells()
-    local cells = {}
-    for i = 1, Canvas.NUM_CELLS do
-        cells[i] = 0
-    end
-    return cells
-end
-
-local function SanitizeCells(cells)
+local function SanitizeCells(cells, size)
     if type(cells) ~= "table" then
-        return FreshCells()
+        return Canvas.New(size)
     end
-    for i = 1, Canvas.NUM_CELLS do
+    local total = Canvas.Cells(size)
+    for i = 1, total do
         local v = cells[i]
         if type(v) ~= "number" or v < 0 or v >= Canvas.NUM_COLORS or v % 1 ~= 0 then
             cells[i] = 0
         end
+    end
+    -- A canvas that shrank (or a corrupt file) must not keep a tail of cells
+    -- past its own area: Serialize would read past the end of the picture.
+    for i = total + 1, #cells do
+        cells[i] = nil
     end
     return cells
 end
@@ -41,6 +39,9 @@ local function SanitizePortrait(id, p)
         p.name = id == Portraits.SHARED_ID and "Shared" or "Untitled"
     end
     if id == Portraits.SHARED_ID then
+        -- The Shared canvas is pinned at the original size on every client
+        -- forever; that is what keeps it readable by any addon version.
+        p.size = Canvas.DEFAULT_SIZE
         p.dist = VALID_SCOPES[p.dist] and p.dist or "AUTO"
         p.members = nil
         p.removed = nil
@@ -48,6 +49,7 @@ local function SanitizePortrait(id, p)
         p.locked = false
         p.lockedBy = nil
     else
+        p.size = Canvas.ValidSize(p.size) and p.size or Canvas.DEFAULT_SIZE
         p.dist = "MEMBERS"
         local members = {}
         if type(p.members) == "table" then
@@ -71,7 +73,7 @@ local function SanitizePortrait(id, p)
         p.locked = p.locked == true
         p.lockedBy = type(p.lockedBy) == "string" and p.lockedBy or nil
     end
-    p.cells = SanitizeCells(p.cells)
+    p.cells = SanitizeCells(p.cells, p.size)
     p.rev = (type(p.rev) == "number" and p.rev >= 0) and math.floor(p.rev) or 0
     p.createdAt = type(p.createdAt) == "number" and p.createdAt or 0
     return p
@@ -122,7 +124,9 @@ local function InitDB()
             if e.name == "" then
                 e.name = "Untitled"
             end
-            e.cells = SanitizeCells(e.cells)
+            -- Gallery entries predating per-portrait sizes are all 64.
+            e.size = Canvas.ValidSize(e.size) and e.size or Canvas.DEFAULT_SIZE
+            e.cells = SanitizeCells(e.cells, e.size)
         end
     end
 
@@ -149,6 +153,9 @@ local function InitDB()
     if type(db.zoom) ~= "number" then
         db.zoom = nil
     end
+    if not Canvas.ValidSize(db.newSize) then
+        db.newSize = Canvas.DEFAULT_SIZE
+    end
     if type(db.minimap) ~= "table" then
         db.minimap = {}
     end
@@ -163,6 +170,10 @@ local events = CreateFrame("Frame")
 events:RegisterEvent("ADDON_LOADED")
 events:RegisterEvent("PLAYER_ENTERING_WORLD")
 events:RegisterEvent("CHAT_MSG_ADDON")
+-- Battle.net addon delivery carries bulk snapshots where it exists. Registering
+-- an event the client does not know about raises, so ask forgiveness: without
+-- it, snapshots simply stay on the chat transport.
+pcall(events.RegisterEvent, events, "BN_CHAT_MSG_ADDON")
 events:SetScript("OnEvent", function(_, event, ...)
     if event == "ADDON_LOADED" then
         local name = ...
@@ -184,6 +195,8 @@ events:SetScript("OnEvent", function(_, event, ...)
         end
     elseif event == "CHAT_MSG_ADDON" then
         WP.Comm:OnMessage(...)
+    elseif event == "BN_CHAT_MSG_ADDON" then
+        WP.Comm:OnBNetMessage(...)
     end
 end)
 

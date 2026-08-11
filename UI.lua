@@ -7,7 +7,7 @@ local UI = {}
 WP.UI = UI
 
 local CELL = 8                      -- on-screen pixels per canvas cell
-local GRID = Canvas.SIZE * CELL     -- 512
+local GRID = Canvas.DEFAULT_SIZE * CELL -- 512, the canvas widget edge
 local FRAME_W = GRID + 28
 -- Canvas bottom edge sits 608px from the frame top; two 22px button rows
 -- (y=14 and y=42) plus breathing room need ~74px below it.
@@ -465,14 +465,14 @@ function UI:BuildCanvas(f)
     end)
 end
 
--- Size of the canvas currently on screen. Per-portrait sizes land in the next
--- stage; until then everything is Canvas.SIZE.
+-- Edge length of whatever canvas is on screen: the active portrait's, or the
+-- gallery entry's while one is open read-only.
 function UI:CurrentSize()
     if self.galleryView then
-        return self.galleryView.entry.size or Canvas.SIZE
+        return self.galleryView.entry.size or Canvas.DEFAULT_SIZE
     end
     local p = Portraits.Active()
-    return (p and p.size) or Canvas.SIZE
+    return (p and p.size) or Canvas.DEFAULT_SIZE
 end
 
 -- Position and size the slot textures for the current zoom, growing the pool
@@ -666,10 +666,11 @@ end
 
 -- Every write to the canvas funnels through here so undo sees all of it.
 function UI:Apply(p, x, y, color)
-    if x < 1 or x > Canvas.SIZE or y < 1 or y > Canvas.SIZE then
+    local size = p.size
+    if x < 1 or x > size or y < 1 or y > size then
         return
     end
-    local i = Canvas.Index(x, y)
+    local i = Canvas.Index(size, x, y)
     if p.cells[i] == color then
         return
     end
@@ -715,7 +716,7 @@ function UI:OnCanvasDown(color)
     self.paintColor = color
 
     if self.tool == "PICK" then
-        self:SelectColor(p.cells[Canvas.Index(x, y)] or 0)
+        self:SelectColor(p.cells[Canvas.Index(p.size, x, y)] or 0)
         self:SetTool("PENCIL")
         return
     end
@@ -724,7 +725,7 @@ function UI:OnCanvasDown(color)
         -- Collect the region before painting any of it: the fill walk reads
         -- the same cells the paint would be mutating.
         local region = {}
-        Canvas.FloodFill(p.cells, x, y, function(fx, fy)
+        Canvas.FloodFill(p.size, p.cells, x, y, function(fx, fy)
             region[#region + 1] = { fx, fy }
         end)
         self.undoScratch = {}
@@ -850,7 +851,7 @@ function UI:ClearPreview()
         for _, c in ipairs(list) do
             local t = self:SlotFor(c[1], c[2])
             if t then
-                local col = Canvas.PALETTE[cells[Canvas.Index(c[1], c[2])]] or Canvas.PALETTE[0]
+                local col = Canvas.PALETTE[cells[Canvas.Index(self:CurrentSize(), c[1], c[2])]] or Canvas.PALETTE[0]
                 t:SetColorTexture(col[1], col[2], col[3])
             end
         end
@@ -902,7 +903,7 @@ function UI:Undo()
     -- Newest change first: a cell touched twice in one action must land back
     -- on the colour it had before the action started.
     for i = #entry.cells, 1, -1 do
-        local x, y = Canvas.Coords(entry.cells[i][1])
+        local x, y = Canvas.Coords(p.size, entry.cells[i][1])
         WP.Comm:Paint(p, x, y, entry.cells[i][2])
     end
     self:UpdateButtons()
@@ -1310,6 +1311,27 @@ function UI:BuildPickerPanel(f)
         StaticPopup_Show("WOWPAINT_NEW")
     end)
 
+    -- Size belongs here rather than in the name popup: StaticPopup's second
+    -- button is OnCancel, which also fires on Escape, so a "128" button there
+    -- would create canvases when the dialog was dismissed.
+    local sizeBtn = CreateFrame("Button", nil, g, "UIPanelButtonTemplate")
+    sizeBtn:SetSize(132, 22)
+    sizeBtn:SetPoint("BOTTOM", g, "BOTTOM", -68, 68)
+    sizeBtn:SetScript("OnClick", function()
+        local sizes = Canvas.SIZES
+        local idx = 1
+        for i, s in ipairs(sizes) do
+            if s == WP.db.newSize then
+                idx = i
+            end
+        end
+        WP.db.newSize = sizes[idx % #sizes + 1]
+        UI:RefreshPicker()
+    end)
+    Tooltip(sizeBtn, "Size of the next new portrait",
+        "128x128 is four times the area. Everyone painting it needs the same addon version, and a first sync costs proportionally more -- fast between Battle.net friends, slower over whispers.")
+    self.pickerSizeBtn = sizeBtn
+
     local galleryBtn = CreateFrame("Button", nil, g, "UIPanelButtonTemplate")
     galleryBtn:SetSize(132, 22)
     galleryBtn:SetPoint("BOTTOM", g, "BOTTOM", 68, 42)
@@ -1365,12 +1387,13 @@ function UI:RefreshPicker()
             row:Show()
             row.highlight:SetShown(p.id == activeId)
             row.text:SetText(p.name .. (p.locked and "  |cffffcc00(locked)|r" or ""))
+            local dims = ("%dx%d"):format(p.size, p.size)
             if p.dist == "MEMBERS" then
                 local n = #(p.members or {})
-                row.sub:SetText(("%d member%s%s"):format(n, n == 1 and "" or "s",
-                    Portraits.IsOwner(p, WP.PlayerFullName()) and "  -  yours" or ""))
+                row.sub:SetText(("%s  -  %d member%s%s"):format(dims, n, n == 1 and "" or "s",
+                    Portraits.IsOwner(p, WP.PlayerFullName()) and ", yours" or ""))
             else
-                row.sub:SetText("shared - " .. (CHANNEL_LABELS[p.dist] or p.dist))
+                row.sub:SetText(("%s  -  shared, %s"):format(dims, CHANNEL_LABELS[p.dist] or p.dist))
             end
             row.openBtn:SetEnabled(p.id ~= activeId)
             row.openBtn:SetScript("OnClick", function()
@@ -1386,6 +1409,7 @@ function UI:RefreshPicker()
     end
     self.pickerPageText:SetText(("Page %d / %d  -  %d portrait%s"):format(
         page, pages, #list, #list == 1 and "" or "s"))
+    self.pickerSizeBtn:SetText(("New size: %d"):format(WP.db.newSize))
     self.pickerCanvasBtn:SetEnabled(not self.frame:IsShown())
 end
 
@@ -1555,9 +1579,11 @@ function UI:CreatePortrait(name)
         WP.Print("You already have a portrait named '" .. name .. "'.")
         return
     end
-    local p = Portraits.Create(name, "MEMBERS", nil, WP.PlayerFullName())
+    local p = Portraits.Create(name, "MEMBERS", nil, WP.PlayerFullName(), WP.db.newSize)
     Portraits.SetActive(p.id)
-    WP.Print("Created portrait '" .. p.name .. "'. Use Invite to bring in painters.")
+    self.panX, self.panY = 1, 1
+    WP.Print(("Created portrait '%s' (%dx%d). Use Invite to bring in painters."):format(
+        p.name, p.size, p.size))
     self:UpdateAll()
 end
 
@@ -1658,7 +1684,7 @@ function UI:UpdateCell(p, x, y)
     if not t then
         return -- painted outside the visible window; nothing to repaint
     end
-    local col = Canvas.PALETTE[p.cells[Canvas.Index(x, y)]] or Canvas.PALETTE[0]
+    local col = Canvas.PALETTE[p.cells[Canvas.Index(p.size, x, y)]] or Canvas.PALETTE[0]
     t:SetColorTexture(col[1], col[2], col[3])
 end
 
@@ -1670,13 +1696,14 @@ function UI:RedrawAll()
     if not cells then
         return
     end
+    local size = self:CurrentSize()
     for row = 1, self.visible do
         local r = self.slots[row]
         for col = 1, self.visible do
             local t = r and r[col]
             if t then
                 local x, y = WP.ViewToCanvas(self.panX, self.panY, col, row)
-                local rgb = Canvas.PALETTE[cells[Canvas.Index(x, y)]] or Canvas.PALETTE[0]
+                local rgb = Canvas.PALETTE[cells[Canvas.Index(size, x, y)]] or Canvas.PALETTE[0]
                 t:SetColorTexture(rgb[1], rgb[2], rgb[3])
             end
         end
