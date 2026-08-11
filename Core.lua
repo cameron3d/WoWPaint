@@ -144,6 +144,11 @@ local function InitDB()
     if type(db.tool) ~= "string" then
         db.tool = nil
     end
+    -- The viewport re-validates the zoom against the active canvas, so this
+    -- only has to reject non-numbers.
+    if type(db.zoom) ~= "number" then
+        db.zoom = nil
+    end
     if type(db.minimap) ~= "table" then
         db.minimap = {}
     end

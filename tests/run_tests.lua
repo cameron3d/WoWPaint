@@ -156,6 +156,48 @@ for i = 2, #pts do
 end
 check(ok, "ForLine is contiguous with correct endpoints on a diagonal")
 
+-- Viewport mapping -----------------------------------------------------------
+
+check(WP.VisibleCells(64, 8, 512) == 64, "a 64 canvas fills the viewport at 8px")
+check(WP.VisibleCells(64, 16, 512) == 32, "zooming to 16px halves what is visible")
+check(WP.VisibleCells(64, 4, 512) == 64, "visible cells never exceed the canvas")
+check(WP.VisibleCells(128, 4, 512) == 128, "a 128 canvas fits at 4px")
+check(WP.VisibleCells(128, 8, 512) == 64, "a 128 canvas shows half its width at 8px")
+
+check(WP.FitZoom(64, 512) == 8, "64 fits the viewport exactly at 8px")
+check(WP.FitZoom(128, 512) == 4, "128 needs 4px to fit")
+check(WP.FitZoom(256, 512) == 4, "beyond the zoom range, fit falls back to the smallest zoom")
+
+local zooms = WP.ZoomList(64, 512)
+check(#zooms == 3 and zooms[1] == 8 and zooms[3] == 32,
+    "a 64 canvas offers 8/16/32 and never a wasteful zoom-out")
+check(#WP.ZoomList(128, 512) == 4, "a 128 canvas also offers the 4px fit level")
+
+check(WP.ClampPan(64, 64, 5) == 1, "pan is pinned when the whole canvas is visible")
+check(WP.ClampPan(64, 32, 1) == 1, "pan cannot go above the first cell")
+check(WP.ClampPan(64, 32, 99) == 33, "pan stops with the last cell flush to the edge")
+check(WP.ClampPan(64, 32, 20) == 20, "pan passes through inside its range")
+
+local vx, vy = WP.ViewToCanvas(33, 17, 1, 1)
+check(vx == 33 and vy == 17, "the first slot shows the panned-to cell")
+vx, vy = WP.ViewToCanvas(33, 17, 32, 32)
+check(vx == 64 and vy == 48, "the last slot shows the far corner of the window")
+
+local cc, cr = WP.CanvasToView(33, 17, 32, 33, 17)
+check(cc == 1 and cr == 1, "CanvasToView inverts ViewToCanvas")
+check(WP.CanvasToView(33, 17, 32, 32, 17) == nil, "cells left of the window are not visible")
+check(WP.CanvasToView(33, 17, 32, 65, 17) == nil, "cells right of the window are not visible")
+ok = true
+for x = 33, 64 do
+    for y = 17, 48 do
+        local c, r = WP.CanvasToView(33, 17, 32, x, y)
+        if not c or WP.ViewToCanvas(33, 17, c, r) ~= x then
+            ok = false
+        end
+    end
+end
+check(ok, "every cell in the window round-trips through both mappings")
+
 -- Wire-format size assumptions ---------------------------------------------
 
 local op = WP.EncodeChar(63) .. WP.EncodeChar(63) .. WP.EncodeChar(15)

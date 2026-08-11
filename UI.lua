@@ -48,6 +48,8 @@ end
 UI.selectedColor = 3 -- black
 UI.tool = "PENCIL"
 UI.brushSize = 1
+UI.zoom = CELL       -- screen pixels per cell
+UI.panX, UI.panY = 1, 1 -- top-left visible cell
 UI.galleryView = nil -- gallery entry being viewed read-only, or nil
 UI.galleryPage = 1
 UI.pickerPage = 1
@@ -218,6 +220,10 @@ function UI:EnsureFrame()
     self.tool = TOOL_BY_ID[WP.db.tool] and WP.db.tool or "PENCIL"
     self.brushSize = WP.db.brushSize or 1
     self.selectedColor = WP.db.color or self.selectedColor
+    -- LayoutViewport re-validates the zoom against the active canvas, so a
+    -- stale saved value cannot leave the grid in an impossible state.
+    self.zoom = WP.db.zoom or CELL
+    self.panX, self.panY = 1, 1
 
     local f = CreateFrame("Frame", "WoWPaintFrame", UIParent, "BackdropTemplate")
     self.frame = f
@@ -416,30 +422,38 @@ function UI:BuildCanvas(f)
     canvas:SetSize(GRID, GRID)
     canvas:SetPoint("TOP", f, "TOP", 0, -96)
     canvas:EnableMouse(true)
+    canvas:EnableMouseWheel(true)
 
-    -- One texture per cell, created once. ~4096 flat color textures batch
-    -- cheaply; creation causes a single small hitch on first open.
-    self.cellTex = {}
-    for y = 1, Canvas.SIZE do
-        for x = 1, Canvas.SIZE do
-            local t = canvas:CreateTexture(nil, "ARTWORK")
-            t:SetSize(CELL, CELL)
-            t:SetPoint("TOPLEFT", canvas, "TOPLEFT", (x - 1) * CELL, -(y - 1) * CELL)
-            self.cellTex[Canvas.Index(x, y)] = t
-        end
-    end
+    -- Textures are allocated per *visible* slot, not per canvas cell, and the
+    -- window they show is moved by panning. A bigger canvas therefore costs
+    -- nothing extra to render until you zoom out far enough to see more of it
+    -- at once, and the pool only ever grows.
+    self.slots = {}
+    self:LayoutViewport()
 
     canvas:SetScript("OnMouseDown", function(_, button)
         if button == "LeftButton" then
             UI:OnCanvasDown(UI.selectedColor)
         elseif button == "RightButton" then
             UI:OnCanvasDown(0)
+        elseif button == "MiddleButton" then
+            UI:StartPan()
         end
     end)
     canvas:SetScript("OnMouseUp", function()
         UI:OnCanvasUp()
     end)
+    canvas:SetScript("OnMouseWheel", function(_, delta)
+        UI:StepZoom(delta > 0 and 1 or -1)
+    end)
     canvas:SetScript("OnUpdate", function()
+        if UI.panDrag then
+            if IsMouseButtonDown("MiddleButton") then
+                UI:DragPan()
+            else
+                UI.panDrag = nil
+            end
+        end
         if not UI.dragging then
             return
         end
@@ -451,31 +465,175 @@ function UI:BuildCanvas(f)
     end)
 end
 
--- Grid guides are built the first time they are switched on: 126 hairline
--- textures are cheap, but there is no reason to pay for them unasked.
-function UI:UpdateGrid()
+-- Size of the canvas currently on screen. Per-portrait sizes land in the next
+-- stage; until then everything is Canvas.SIZE.
+function UI:CurrentSize()
+    if self.galleryView then
+        return self.galleryView.entry.size or Canvas.SIZE
+    end
+    local p = Portraits.Active()
+    return (p and p.size) or Canvas.SIZE
+end
+
+-- Position and size the slot textures for the current zoom, growing the pool
+-- on demand and parking slots that fall outside the window.
+function UI:LayoutViewport()
     if not self.canvas then
         return
     end
-    local want = WP.db.showGrid and true or false
-    if want and not self.gridTex then
-        self.gridTex = {}
-        for i = 1, Canvas.SIZE - 1 do
-            local v = self.canvas:CreateTexture(nil, "OVERLAY")
-            v:SetColorTexture(0, 0, 0, 0.18)
-            v:SetSize(1, GRID)
-            v:SetPoint("TOPLEFT", self.canvas, "TOPLEFT", i * CELL, 0)
-            local h = self.canvas:CreateTexture(nil, "OVERLAY")
-            h:SetColorTexture(0, 0, 0, 0.18)
-            h:SetSize(GRID, 1)
-            h:SetPoint("TOPLEFT", self.canvas, "TOPLEFT", 0, -i * CELL)
-            self.gridTex[#self.gridTex + 1] = v
-            self.gridTex[#self.gridTex + 1] = h
+    local size = self:CurrentSize()
+    local zooms = WP.ZoomList(size, GRID)
+    local valid = false
+    for _, z in ipairs(zooms) do
+        if z == self.zoom then
+            valid = true
         end
     end
-    for _, t in ipairs(self.gridTex or {}) do
-        t:SetShown(want)
+    if not valid then
+        self.zoom = zooms[1]
     end
+
+    local n = WP.VisibleCells(size, self.zoom, GRID)
+    self.visible = n
+    self.panX = WP.ClampPan(size, n, self.panX)
+    self.panY = WP.ClampPan(size, n, self.panY)
+    -- Repositioning every slot is O(visible^2); UpdateAll runs on every
+    -- roster message, so skip the work unless the layout actually changed.
+    local key = size .. ":" .. self.zoom
+    if self.layoutKey == key then
+        return
+    end
+    self.layoutKey = key
+    -- Centre the grid when the canvas does not fill the widget exactly.
+    local off = math.floor((GRID - n * self.zoom) / 2)
+    self.viewOffset = off
+
+    local reach = math.max(n, self.laidOut or 0)
+    for row = 1, reach do
+        self.slots[row] = self.slots[row] or {}
+        local r = self.slots[row]
+        for col = 1, reach do
+            if row <= n and col <= n then
+                local t = r[col]
+                if not t then
+                    t = self.canvas:CreateTexture(nil, "ARTWORK")
+                    r[col] = t
+                end
+                t:ClearAllPoints()
+                t:SetSize(self.zoom, self.zoom)
+                t:SetPoint("TOPLEFT", self.canvas, "TOPLEFT",
+                    off + (col - 1) * self.zoom, -(off + (row - 1) * self.zoom))
+                t:Show()
+            elseif r[col] then
+                r[col]:Hide()
+            end
+        end
+    end
+    self.laidOut = n
+    self:UpdateGrid()
+end
+
+-- The texture showing a canvas cell, or nil when it is scrolled out of sight.
+function UI:SlotFor(x, y)
+    local col, row = WP.CanvasToView(self.panX, self.panY, self.visible or 0, x, y)
+    if not col then
+        return nil
+    end
+    local r = self.slots and self.slots[row]
+    return r and r[col]
+end
+
+function UI:StepZoom(dir)
+    if self.galleryView and dir == 0 then
+        return
+    end
+    local size = self:CurrentSize()
+    local zooms = WP.ZoomList(size, GRID)
+    local idx = 1
+    for i, z in ipairs(zooms) do
+        if z == self.zoom then
+            idx = i
+        end
+    end
+    local target = math.min(#zooms, math.max(1, idx + dir))
+    if target == idx then
+        return
+    end
+    -- Keep whatever is under the cursor roughly in view across the change.
+    local ax, ay = self:CellFromCursor(true)
+    self.zoom = zooms[target]
+    WP.db.zoom = self.zoom
+    self:LayoutViewport()
+    if ax then
+        self.panX = WP.ClampPan(size, self.visible, ax - math.floor(self.visible / 2))
+        self.panY = WP.ClampPan(size, self.visible, ay - math.floor(self.visible / 2))
+    end
+    self:RedrawAll()
+    self:UpdateButtons()
+end
+
+function UI:StartPan()
+    if not self.visible or self.visible >= self:CurrentSize() then
+        return -- nothing to pan: the whole canvas is on screen
+    end
+    local scale = self.canvas:GetEffectiveScale()
+    local cx, cy = GetCursorPosition()
+    self.panDrag = { cx = cx / scale, cy = cy / scale, px = self.panX, py = self.panY }
+end
+
+function UI:DragPan()
+    local d = self.panDrag
+    local scale = self.canvas:GetEffectiveScale()
+    local cx, cy = GetCursorPosition()
+    cx, cy = cx / scale, cy / scale
+    local size = self:CurrentSize()
+    -- Grab-the-canvas: dragging right reveals what is to the left. Screen y
+    -- grows upward, canvas rows grow downward, hence the flipped signs.
+    local nx = WP.ClampPan(size, self.visible, d.px + math.floor((d.cx - cx) / self.zoom + 0.5))
+    local ny = WP.ClampPan(size, self.visible, d.py + math.floor((cy - d.cy) / self.zoom + 0.5))
+    if nx ~= self.panX or ny ~= self.panY then
+        self.panX, self.panY = nx, ny
+        self:RedrawAll()
+    end
+end
+
+-- Guides follow the zoom, so they are repositioned rather than built once.
+-- Hairline textures are cheap, but there is no reason to pay for them unasked.
+function UI:UpdateGrid()
+    if not self.canvas or not self.visible then
+        return
+    end
+    self.gridTex = self.gridTex or {}
+    local want = WP.db.showGrid and true or false
+    local zoom, off = self.zoom, self.viewOffset or 0
+    local span = self.visible * zoom
+    local needed = want and (self.visible - 1) or 0
+    for i = 1, math.max(needed, self.gridLines or 0) do
+        local pair = self.gridTex[i]
+        if i <= needed then
+            if not pair then
+                pair = {
+                    v = self.canvas:CreateTexture(nil, "OVERLAY"),
+                    h = self.canvas:CreateTexture(nil, "OVERLAY"),
+                }
+                pair.v:SetColorTexture(0, 0, 0, 0.18)
+                pair.h:SetColorTexture(0, 0, 0, 0.18)
+                self.gridTex[i] = pair
+            end
+            pair.v:ClearAllPoints()
+            pair.v:SetSize(1, span)
+            pair.v:SetPoint("TOPLEFT", self.canvas, "TOPLEFT", off + i * zoom, -off)
+            pair.h:ClearAllPoints()
+            pair.h:SetSize(span, 1)
+            pair.h:SetPoint("TOPLEFT", self.canvas, "TOPLEFT", off, -(off + i * zoom))
+            pair.v:Show()
+            pair.h:Show()
+        elseif pair then
+            pair.v:Hide()
+            pair.h:Hide()
+        end
+    end
+    self.gridLines = needed
 end
 
 ----------------------------------------------------------------------
@@ -493,16 +651,17 @@ function UI:CellFromCursor(clamp)
     local scale = canvas:GetEffectiveScale()
     local cx, cy = GetCursorPosition()
     cx, cy = cx / scale, cy / scale
-    local x = math.floor((cx - left) / CELL) + 1
-    local y = math.floor((top - cy) / CELL) + 1
-    if x < 1 or x > Canvas.SIZE or y < 1 or y > Canvas.SIZE then
+    local off, zoom, n = self.viewOffset or 0, self.zoom, self.visible or 0
+    local col = math.floor((cx - left - off) / zoom) + 1
+    local row = math.floor((top - cy - off) / zoom) + 1
+    if col < 1 or col > n or row < 1 or row > n then
         if not clamp then
             return nil
         end
-        x = math.min(Canvas.SIZE, math.max(1, x))
-        y = math.min(Canvas.SIZE, math.max(1, y))
+        col = math.min(n, math.max(1, col))
+        row = math.min(n, math.max(1, row))
     end
-    return x, y
+    return WP.ViewToCanvas(self.panX, self.panY, col, row)
 end
 
 -- Every write to the canvas funnels through here so undo sees all of it.
@@ -673,7 +832,10 @@ function UI:PreviewShape(x, y)
     self.previewList = list
     local col = Canvas.PALETTE[self.paintColor] or Canvas.PALETTE[0]
     for _, c in ipairs(list) do
-        self.cellTex[Canvas.Index(c[1], c[2])]:SetColorTexture(col[1], col[2], col[3])
+        local t = self:SlotFor(c[1], c[2])
+        if t then
+            t:SetColorTexture(col[1], col[2], col[3])
+        end
     end
 end
 
@@ -684,11 +846,13 @@ function UI:ClearPreview()
         return {}
     end
     local cells = self:CurrentCells()
-    if cells and self.cellTex then
+    if cells then
         for _, c in ipairs(list) do
-            local i = Canvas.Index(c[1], c[2])
-            local col = Canvas.PALETTE[cells[i]] or Canvas.PALETTE[0]
-            self.cellTex[i]:SetColorTexture(col[1], col[2], col[3])
+            local t = self:SlotFor(c[1], c[2])
+            if t then
+                local col = Canvas.PALETTE[cells[Canvas.Index(c[1], c[2])]] or Canvas.PALETTE[0]
+                t:SetColorTexture(col[1], col[2], col[3])
+            end
         end
     end
     return list
@@ -782,6 +946,26 @@ function UI:BuildBottomBars(f)
     scopeBtn:SetScript("OnLeave", function()
         GameTooltip:Hide()
     end)
+
+    local zoomBtn = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
+    self.zoomBtn = zoomBtn
+    zoomBtn:SetSize(58, 22)
+    zoomBtn:SetPoint("BOTTOMLEFT", f, "BOTTOMLEFT", 130, 14)
+    zoomBtn:SetScript("OnClick", function()
+        -- Cycle inwards, wrapping back to the fit level.
+        local zooms = WP.ZoomList(UI:CurrentSize(), GRID)
+        if UI.zoom == zooms[#zooms] then
+            UI.zoom = zooms[1]
+            WP.db.zoom = UI.zoom
+            UI:LayoutViewport()
+            UI:RedrawAll()
+            UI:UpdateButtons()
+        else
+            UI:StepZoom(1)
+        end
+    end)
+    Tooltip(zoomBtn, "Zoom",
+        "Click to step in, or use the mouse wheel over the canvas. Middle-drag pans when the canvas is larger than the window.")
 
     local clearBtn = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
     self.clearBtn = clearBtn
@@ -1211,6 +1395,7 @@ function UI:OpenPortrait(id)
         return
     end
     self.galleryView = nil
+    self.panX, self.panY = 1, 1 -- a different canvas starts at its top-left
     -- Picking a portrait is a request to paint it, including from the
     -- minimap launcher with the canvas closed.
     self.frame:Show()
@@ -1462,29 +1647,39 @@ function UI:CurrentCells()
 end
 
 function UI:UpdateCell(p, x, y)
-    if not self.cellTex or self.galleryView then
+    if not self.slots or self.galleryView then
         return
     end
     local active = Portraits.Active()
     if not active or active.id ~= p.id then
         return
     end
-    local i = Canvas.Index(x, y)
-    local col = Canvas.PALETTE[p.cells[i]] or Canvas.PALETTE[0]
-    self.cellTex[i]:SetColorTexture(col[1], col[2], col[3])
+    local t = self:SlotFor(x, y)
+    if not t then
+        return -- painted outside the visible window; nothing to repaint
+    end
+    local col = Canvas.PALETTE[p.cells[Canvas.Index(x, y)]] or Canvas.PALETTE[0]
+    t:SetColorTexture(col[1], col[2], col[3])
 end
 
 function UI:RedrawAll()
-    if not self.cellTex then
+    if not self.slots or not self.visible then
         return
     end
     local cells = self:CurrentCells()
     if not cells then
         return
     end
-    for i = 1, Canvas.NUM_CELLS do
-        local col = Canvas.PALETTE[cells[i]] or Canvas.PALETTE[0]
-        self.cellTex[i]:SetColorTexture(col[1], col[2], col[3])
+    for row = 1, self.visible do
+        local r = self.slots[row]
+        for col = 1, self.visible do
+            local t = r and r[col]
+            if t then
+                local x, y = WP.ViewToCanvas(self.panX, self.panY, col, row)
+                local rgb = Canvas.PALETTE[cells[Canvas.Index(x, y)]] or Canvas.PALETTE[0]
+                t:SetColorTexture(rgb[1], rgb[2], rgb[3])
+            end
+        end
     end
 end
 
@@ -1563,6 +1758,12 @@ function UI:UpdateButtons()
     end
     self.sizeBtn:SetText("Nib " .. (self.brushSize or 1))
     self.sizeBtn:SetEnabled(paintable)
+    local canvasSize = self:CurrentSize()
+    if self.visible and self.visible < canvasSize then
+        self.zoomBtn:SetText(("%dpx %d/%d"):format(self.zoom, self.visible, canvasSize))
+    else
+        self.zoomBtn:SetText(("Zoom %dpx"):format(self.zoom or CELL))
+    end
     self.undoBtn:SetEnabled(paintable and self:UndoIndex() ~= nil)
     if WP.db.showGrid then
         self.gridBtn:LockHighlight()
@@ -1589,6 +1790,7 @@ function UI:UpdateAll()
     if not self.frame then
         return
     end
+    self:LayoutViewport()
     self:UpdateTitle()
     self:UpdateButtons()
     self:UpdateStatus()

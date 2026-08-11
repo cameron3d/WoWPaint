@@ -90,6 +90,71 @@ function WP.ForEllipse(x0, y0, x1, y1, filled, fn)
     end
 end
 
+----------------------------------------------------------------------
+-- Viewport: which slice of a canvas the fixed grid of textures shows
+--
+-- Screen textures are allocated per *visible* cell, never per canvas cell,
+-- so a bigger canvas costs nothing extra to render until you zoom out far
+-- enough to see more of it at once. All of this is pure arithmetic and is
+-- covered by the desktop suite; the UI only feeds it numbers.
+----------------------------------------------------------------------
+
+WP.ZOOMS = { 4, 8, 16, 32 } -- screen pixels per cell, ascending
+WP.VIEW_PX = 512            -- edge of the square canvas widget
+
+-- How many cells fit across the viewport at this zoom, never more than the
+-- canvas has.
+function WP.VisibleCells(size, zoom, viewPx)
+    local fit = math.floor((viewPx or WP.VIEW_PX) / zoom)
+    return math.min(size, math.max(1, fit))
+end
+
+-- The most zoomed-out level worth offering: the largest zoom at which the
+-- whole canvas still fits. Zooming out past that only shrinks the picture
+-- inside a fixed widget, so there is nothing to gain.
+function WP.FitZoom(size, viewPx)
+    viewPx = viewPx or WP.VIEW_PX
+    local best = WP.ZOOMS[1]
+    for _, z in ipairs(WP.ZOOMS) do
+        if size * z <= viewPx then
+            best = z
+        end
+    end
+    return best
+end
+
+-- Zoom levels offered for a canvas of this size: fit level and inwards.
+function WP.ZoomList(size, viewPx)
+    local fit = WP.FitZoom(size, viewPx)
+    local list = {}
+    for _, z in ipairs(WP.ZOOMS) do
+        if z >= fit then
+            list[#list + 1] = z
+        end
+    end
+    return list
+end
+
+-- Keep the top-left visible cell inside the canvas.
+function WP.ClampPan(size, visible, pan)
+    local maxPan = math.max(1, size - visible + 1)
+    return math.min(math.max(1, math.floor(pan or 1)), maxPan)
+end
+
+-- Viewport slot (1-based col,row) -> canvas cell.
+function WP.ViewToCanvas(panX, panY, col, row)
+    return panX + col - 1, panY + row - 1
+end
+
+-- Canvas cell -> viewport slot, or nil when it is scrolled out of sight.
+function WP.CanvasToView(panX, panY, visible, x, y)
+    local col, row = x - panX + 1, y - panY + 1
+    if col < 1 or col > visible or row < 1 or row > visible then
+        return nil
+    end
+    return col, row
+end
+
 function WP.PlayerFullName()
     if not WP.playerFullName then
         local name, realm = UnitFullName("player")
