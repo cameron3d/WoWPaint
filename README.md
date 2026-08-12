@@ -1,4 +1,4 @@
-# WoWPaint
+# Pixel Party
 
 Collaborative pixel painting for **WoW Classic Era / Anniversary** (1.15.x). Paint a shared
 64×64 canvas with your guild or group, create invite-only **portraits** (up to 128×128) with
@@ -8,16 +8,19 @@ personal **gallery**.
 ## Install
 
 1. Copy this folder into `World of Warcraft\_classic_era_\Interface\AddOns\` so you have
-   `...\AddOns\WoWPaint\WoWPaint.toc`.
-2. Restart the client if it was running (a `/reload` is enough if you were already logged in).
+   `...\AddOns\PixelParty\PixelParty.toc`.
+2. Fully exit and restart the client; `/reload` does not discover a newly named addon package.
 3. Everyone who wants to paint (or watch) needs the addon installed.
+
+Pixel Party intentionally starts with a fresh SavedVariables identity. Canvases, portraits,
+gallery entries, and UI settings stored by an earlier package are not imported.
 
 ## Paint
 
 - The **minimap button** is the front door: **left-click** opens the canvas, **right-click**
   opens the Portraits panel — pick a canvas to paint, browse the **Gallery**, or start a
-  **New portrait**. Drag it around the minimap ring; `/wowpaint minimap` hides or shows it.
-- `/wowpaint` (or `/wpaint`) — toggle the canvas window.
+  **New portrait**. Drag it around the minimap ring; `/pixelparty minimap` hides or shows it.
+- `/pixelparty` (or `/pparty`) — toggle the canvas window.
 - **Left-click / drag** paints with the selected color; **right-click / drag** erases — with
   every tool, so right-dragging a box erases a box.
 - The palette row selects one of 16 colors (classic r/place palette).
@@ -50,40 +53,40 @@ thing that can work without a server.
 ## The Shared canvas
 
 The built-in **Shared** portrait works with zero setup: everyone in your scope who runs the
-addon paints the same picture. The **Scope** button (or `/wowpaint channel`) cycles
+addon paints the same picture. The **Scope** button (or `/pixelparty channel`) cycles
 Auto → Guild → Party → Raid; *Auto* prefers your battleground/instance group, then Raid,
 Party, Guild.
 
 ## Portraits and invitations
 
-- **New** (or `/wowpaint new Sunset Over Orgrimmar`) creates a named portrait with you as its
+- **New** (or `/pixelparty new Sunset Over Orgrimmar`) creates a named portrait with you as its
   creator and sole member. The Portraits panel has a **New size** toggle: **64×64** or
   **128×128**, four times the area. The Shared canvas is always 64×64.
 - Everyone painting a 128×128 portrait needs the same addon version — older clients can't read
   the wider coordinates. If someone's out of date you'll get a warning in chat rather than
   silently mismatched art. The Shared canvas works across every version.
-- **Invite** (or `/wowpaint invite Thrall`) whispers an invitation — it prefills your current
+- **Invite** (or `/pixelparty invite Thrall`) whispers an invitation — it prefills your current
   friendly target. The invitee gets an accept/decline popup; on accept they join the roster
   and receive the canvas automatically. Any member can invite others (up to 24 members).
 - Members paint together over whispers, so they **don't need to share a guild or group** —
   anyone you can whisper works. Around 6 simultaneous painters stays smooth; bigger rosters
   get laggier strokes, never disconnects.
 - **Portrait:** opens the picker — every canvas you have, with member counts and lock state;
-  **Paint** switches to one, **Remove** drops your copy (`/wowpaint portraits`, the minimap
+  **Paint** switches to one, **Remove** drops your copy (`/pixelparty portraits`, the minimap
   button's right-click, or `open <name>` / `list` / `delete <name>` from chat). The panel
   floats free of the canvas window, so it works as a launcher with the canvas closed.
 - **Members: N** opens the roster (hover it for a quick list). The creator gets an
-  **Uninvite** button beside every other member; `/wowpaint uninvite Thrall` does the same.
+  **Uninvite** button beside every other member; `/pixelparty uninvite Thrall` does the same.
   Uninviting deletes that player's copy and they can no longer paint it — only the creator
   can do it, and only the creator can invite them back afterwards.
 
 ## Locking and the gallery
 
-- **Lock** (creator only, `/wowpaint lock` / `unlock`) freezes a portrait for everyone — no
+- **Lock** (creator only, `/pixelparty lock` / `unlock`) freezes a portrait for everyone — no
   more painting or clearing until the creator unlocks. Inviting people to a locked portrait
   is how you share finished art.
-- **Save** (`/wowpaint save [name]`) snapshots the active canvas into your local gallery;
-  **Gallery** (`/wowpaint gallery`) browses saved pieces read-only (View/Delete, paged) with
+- **Save** (`/pixelparty save [name]`) snapshots the active canvas into your local gallery;
+  **Gallery** (`/pixelparty gallery`) browses saved pieces read-only (View/Delete, paged) with
   **Back to painting** to leave the read-only view. Gallery copies are yours alone and never
   change, even if the live portrait is painted over.
 
@@ -118,7 +121,7 @@ trust rules, and the SavedVariables migration path:
 lua tests/run_tests.lua
 ```
 
-Design notes: [docs/superpowers/specs/2026-08-10-wowpaint-design.md](docs/superpowers/specs/2026-08-10-wowpaint-design.md).
+Design notes: [docs/superpowers/specs/2026-08-10-pixel-party-design.md](docs/superpowers/specs/2026-08-10-pixel-party-design.md).
 
-If Blizzard bumps the Classic Era client past 1.15.7, update `## Interface:` in
-[WoWPaint.toc](WoWPaint.toc) (or enable "Load out of date AddOns").
+If Blizzard bumps the Classic Era client past 1.15.9, update `## Interface:` in
+[PixelParty.toc](PixelParty.toc) (or enable "Load out of date AddOns").

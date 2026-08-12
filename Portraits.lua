@@ -1,9 +1,9 @@
-local ADDON_NAME, WP = ...
+local ADDON_NAME, PP = ...
 
-local Canvas = WP.Canvas
+local Canvas = PP.Canvas
 
 local Portraits = {}
-WP.Portraits = Portraits
+PP.Portraits = Portraits
 
 Portraits.SHARED_ID = "000000" -- every client agrees on the built-in Shared canvas
 Portraits.MAX_NAME = 24
@@ -15,10 +15,10 @@ Portraits.MAX_REMOVED = 32     -- bounds the uninvite tombstone set
 function Portraits.GenerateId()
     local chars = {}
     for i = 1, 6 do
-        chars[i] = WP.EncodeChar(math.random(0, 63))
+        chars[i] = PP.EncodeChar(math.random(0, 63))
     end
     local id = table.concat(chars)
-    if id == Portraits.SHARED_ID or (WP.db and WP.db.portraits and WP.db.portraits[id]) then
+    if id == Portraits.SHARED_ID or (PP.db and PP.db.portraits and PP.db.portraits[id]) then
         return Portraits.GenerateId()
     end
     return id
@@ -29,7 +29,7 @@ function Portraits.ValidId(id)
         return false
     end
     for i = 1, 6 do
-        if not WP.DecodeChar(id:sub(i, i)) then
+        if not PP.DecodeChar(id:sub(i, i)) then
             return false
         end
     end
@@ -80,16 +80,16 @@ function Portraits.Create(name, dist, id, owner, size)
             p.members[1] = owner
         end
     end
-    WP.db.portraits[p.id] = p
+    PP.db.portraits[p.id] = p
     return p
 end
 
 function Portraits.Get(id)
-    return WP.db and WP.db.portraits and WP.db.portraits[id] or nil
+    return PP.db and PP.db.portraits and PP.db.portraits[id] or nil
 end
 
 function Portraits.Active()
-    return Portraits.Get(WP.db.activeId) or Portraits.Get(Portraits.SHARED_ID)
+    return Portraits.Get(PP.db.activeId) or Portraits.Get(Portraits.SHARED_ID)
 end
 
 function Portraits.SetActive(id)
@@ -97,8 +97,8 @@ function Portraits.SetActive(id)
         return false
     end
     -- Pending strokes belong to the portrait they were painted on.
-    WP.Comm:FlushPaintOps()
-    WP.db.activeId = id
+    PP.Comm:FlushPaintOps()
+    PP.db.activeId = id
     return true
 end
 
@@ -199,7 +199,7 @@ function Portraits.FindByName(name)
     if name == "" then
         return nil
     end
-    for _, p in pairs(WP.db.portraits) do
+    for _, p in pairs(PP.db.portraits) do
         if p.name:lower() == name then
             return p
         end
@@ -218,7 +218,7 @@ end
 -- Stable display order: Shared first, then creation order.
 function Portraits.List()
     local arr = {}
-    for _, p in pairs(WP.db.portraits) do
+    for _, p in pairs(PP.db.portraits) do
         arr[#arr + 1] = p
     end
     table.sort(arr, function(a, b)
@@ -240,9 +240,9 @@ function Portraits.Delete(id)
     if id == Portraits.SHARED_ID or not Portraits.Get(id) then
         return false
     end
-    WP.db.portraits[id] = nil
-    if WP.db.activeId == id then
-        WP.db.activeId = Portraits.SHARED_ID
+    PP.db.portraits[id] = nil
+    if PP.db.activeId == id then
+        PP.db.activeId = Portraits.SHARED_ID
     end
     return true
 end
@@ -264,13 +264,13 @@ function Portraits.SaveToGallery(p, name)
         savedAt = time(),
         source = p.name,
     }
-    WP.db.gallery[#WP.db.gallery + 1] = entry
+    PP.db.gallery[#PP.db.gallery + 1] = entry
     return entry
 end
 
 function Portraits.DeleteGalleryEntry(index)
-    if WP.db.gallery[index] then
-        table.remove(WP.db.gallery, index)
+    if PP.db.gallery[index] then
+        table.remove(PP.db.gallery, index)
         return true
     end
     return false

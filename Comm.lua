@@ -1,12 +1,12 @@
-local ADDON_NAME, WP = ...
+local ADDON_NAME, PP = ...
 
-local Canvas = WP.Canvas
-local Portraits = WP.Portraits
+local Canvas = PP.Canvas
+local Portraits = PP.Portraits
 
 local Comm = {}
-WP.Comm = Comm
+PP.Comm = Comm
 
-Comm.PREFIX = "WoWPaint"
+Comm.PREFIX = "PixelParty"
 
 -- One send per interval keeps worst-case throughput around 730 B/s, below
 -- the ~800 B/s rate the chat server tolerates indefinitely.
@@ -106,7 +106,7 @@ end
 -- when nothing could be sent.
 function Comm:Send(p, msg, tag)
     if p.dist == "MEMBERS" then
-        local me = WP.PlayerFullName()
+        local me = PP.PlayerFullName()
         local sent = false
         for _, m in ipairs(p.members or {}) do
             if m ~= me then
@@ -203,7 +203,7 @@ function Comm:OnOwnEcho(text)
                     if self.pendingPid == e.pid and #self.pendingOps > 0 then
                         self:ApplyOps(p, table.concat(self.pendingOps))
                     end
-                    WP.UI:RedrawAll()
+                    PP.UI:RedrawAll()
                 end
             end
             return
@@ -218,7 +218,7 @@ end
 -- Entry point for the UI: apply a local paint immediately and queue it for
 -- sending. Ops are batched per portrait; switching portraits flushes.
 function Comm:Paint(p, x, y, color)
-    if not WP.db or p.locked then
+    if not PP.db or p.locked then
         return
     end
     if self.pendingPid and self.pendingPid ~= p.id then
@@ -226,9 +226,9 @@ function Comm:Paint(p, x, y, color)
     end
     if Canvas.SetPixel(p.size, p.cells, x, y, color) then
         self.pendingPid = p.id
-        WP.UI:UpdateCell(p, x, y)
-        self.pendingOps[#self.pendingOps + 1] = WP.EncodeOp(p.size, x, y, color)
-        if #self.pendingOps >= MAX_OPS[WP.OpWidth(p.size)] then
+        PP.UI:UpdateCell(p, x, y)
+        self.pendingOps[#self.pendingOps + 1] = PP.EncodeOp(p.size, x, y, color)
+        if #self.pendingOps >= MAX_OPS[PP.OpWidth(p.size)] then
             self:FlushPaintOps()
         end
     end
@@ -257,25 +257,25 @@ function Comm:FlushPaintOps()
     else
         p.rev = p.rev + 1
     end
-    WP.UI:UpdateStatus()
+    PP.UI:UpdateStatus()
 end
 
 -- Apply a string of 3-character (x, y, color) triples. Input is untrusted;
 -- bad triples are skipped.
 function Comm:ApplyOps(p, ops)
-    local width = WP.OpWidth(p.size)
+    local width = PP.OpWidth(p.size)
     for i = 1, #ops - width + 1, width do
-        local x, y, c = WP.DecodeOp(p.size, ops, i)
+        local x, y, c = PP.DecodeOp(p.size, ops, i)
         if x and c < Canvas.NUM_COLORS then
             if Canvas.SetPixel(p.size, p.cells, x, y, c) then
-                WP.UI:UpdateCell(p, x, y)
+                PP.UI:UpdateCell(p, x, y)
             end
         end
     end
 end
 
 function Comm:SendClear(p)
-    if not WP.db or p.locked then
+    if not PP.db or p.locked then
         return
     end
     -- A local clear supersedes any snapshot in flight for this portrait and
@@ -293,9 +293,9 @@ function Comm:SendClear(p)
     end
     Canvas.Clear(p.size, p.cells)
     p.rev = p.rev + 1
-    WP.UI:RedrawAll()
+    PP.UI:RedrawAll()
     self:Send(p, "C" .. p.id)
-    WP.UI:UpdateStatus()
+    PP.UI:UpdateStatus()
 end
 
 function Comm:DiscardBufferedFor(pid)
@@ -371,7 +371,7 @@ function Comm:SendHello(p, force)
     if not force and last and now - last < HELLO_MIN_INTERVAL then
         return false
     end
-    local sent = self:Send(p, "H" .. p.id .. ":" .. p.rev .. ":" .. WP.VERSION .. ":" .. p.size)
+    local sent = self:Send(p, "H" .. p.id .. ":" .. p.rev .. ":" .. PP.VERSION .. ":" .. p.size)
     if sent then
         self.lastHelloAt[p.id] = now
     end
@@ -401,7 +401,7 @@ function Comm:WarnSizeMismatch(p, theirSize, sender)
         return
     end
     self.lastSizeWarnAt[key] = now
-    WP.Print(("%s sees '%s' as a %s canvas, you see %d. They need the same addon version; paint will not line up until then."):format(
+    PP.Print(("%s sees '%s' as a %s canvas, you see %d. They need the same addon version; paint will not line up until then."):format(
         Ambiguate(sender, "short"), p.name,
         theirSize and (theirSize .. "x" .. theirSize) or "64x64 (older version)", p.size))
 end
@@ -481,7 +481,7 @@ function Comm:AcceptBestOffer()
     }
     self:DiscardBufferedFor(p.id)
     self:Whisper("G" .. p.id, w.sender)
-    WP.UI:UpdateStatus()
+    PP.UI:UpdateStatus()
     self:WatchSync()
 end
 
@@ -511,8 +511,8 @@ function Comm:AbortSync(message)
     self:FlushPaintOps()
     self.sync = nil
     self:ReplayBuffered()
-    WP.Print(message or "Canvas sync timed out.")
-    WP.UI:UpdateStatus()
+    PP.Print(message or "Canvas sync timed out.")
+    PP.UI:UpdateStatus()
 end
 
 -- Apply B/C events that were deferred while a snapshot was in flight, in
@@ -531,7 +531,7 @@ function Comm:ReplayBuffered()
                 for _, ops in ipairs(ev.reapply or {}) do
                     self:ApplyOps(p, ops)
                 end
-                WP.UI:RedrawAll()
+                PP.UI:RedrawAll()
             elseif ev.ops then
                 self:ApplyOps(p, ev.ops)
             end
@@ -700,16 +700,16 @@ function Comm:FinishSync()
                 p.locked = false
                 p.lockedBy = nil
             end
-            WP.UI:RedrawAll()
-            WP.Print("Canvas synced from " .. Ambiguate(s.source, "short") .. ".")
+            PP.UI:RedrawAll()
+            PP.Print("Canvas synced from " .. Ambiguate(s.source, "short") .. ".")
         else
-            WP.Print("Canvas sync failed (corrupt snapshot data); use /wowpaint sync to retry.")
+            PP.Print("Canvas sync failed (corrupt snapshot data); use /pixelparty sync to retry.")
         end
     end
     -- Batches that arrived mid-transfer may or may not already be in the
     -- snapshot; pixel ops are idempotent, so replaying them is safe.
     self:ReplayBuffered()
-    WP.UI:UpdateAll()
+    PP.UI:UpdateAll()
 end
 
 ----------------------------------------------------------------------
@@ -720,7 +720,7 @@ function Comm:SendInvite(p, target)
     if p.dist ~= "MEMBERS" then
         return false, "Only member portraits can send invites (not the Shared canvas)."
     end
-    target = WP.NormalizeName(target)
+    target = PP.NormalizeName(target)
     if not target then
         return false, "No player name given."
     end
@@ -730,7 +730,7 @@ function Comm:SendInvite(p, target)
     if Portraits.IsRemoved(p, target) then
         -- Only the owner can undo their own uninvite; anyone else's re-invite
         -- would be filtered out by every peer's tombstone anyway.
-        if not Portraits.IsOwner(p, WP.PlayerFullName()) then
+        if not Portraits.IsOwner(p, PP.PlayerFullName()) then
             return false, Ambiguate(target, "short")
                 .. " was uninvited by the creator - only they can bring them back."
         end
@@ -769,11 +769,11 @@ function Comm:OnInvite(id, rest, sender)
     if name == "" then
         name = "Untitled"
     end
-    WP.UI:ShowInvitePopup({
+    PP.UI:ShowInvitePopup({
         id = id,
         name = name,
         size = size,
-        owner = WP.NormalizeName(owner ~= "" and owner or sender),
+        owner = PP.NormalizeName(owner ~= "" and owner or sender),
         from = sender,
     })
 end
@@ -789,7 +789,7 @@ function Comm:AcceptInvite(data)
     -- than as a literal: a nil in the middle would truncate the ipairs walk
     -- and leave us with a roster that trusts nobody.
     local roster = {}
-    for _, name in ipairs({ WP.PlayerFullName() or false, data.from or false, data.owner or false }) do
+    for _, name in ipairs({ PP.PlayerFullName() or false, data.from or false, data.owner or false }) do
         if name then
             roster[#roster + 1] = name
         end
@@ -797,8 +797,8 @@ function Comm:AcceptInvite(data)
     Portraits.AddMembers(p, roster)
     self:Whisper("J" .. p.id, data.from)
     Portraits.SetActive(p.id)
-    WP.Print("Joined portrait '" .. p.name .. "'. Syncing from " .. Ambiguate(data.from, "short") .. "...")
-    WP.UI:UpdateAll()
+    PP.Print("Joined portrait '" .. p.name .. "'. Syncing from " .. Ambiguate(data.from, "short") .. "...")
+    PP.UI:UpdateAll()
 end
 
 function Comm:OnJoin(p, sender)
@@ -815,8 +815,8 @@ function Comm:OnJoin(p, sender)
     if p.rev > 0 then
         self:Whisper("O" .. p.id .. ":" .. p.rev, sender)
     end
-    WP.Print(Ambiguate(sender, "short") .. " joined portrait '" .. p.name .. "'.")
-    WP.UI:UpdateAll()
+    PP.Print(Ambiguate(sender, "short") .. " joined portrait '" .. p.name .. "'.")
+    PP.UI:UpdateAll()
 end
 
 -- Whisper the full roster to every member, chunked under the payload cap.
@@ -831,7 +831,7 @@ function Comm:SendRoster(p)
     for _, m in ipairs(p.members) do
         tokens[#tokens + 1] = m
     end
-    if Portraits.IsOwner(p, WP.PlayerFullName()) then
+    if Portraits.IsOwner(p, PP.PlayerFullName()) then
         for _, m in ipairs(p.removed or {}) do
             tokens[#tokens + 1] = "-" .. m
         end
@@ -888,7 +888,7 @@ function Comm:OnRoster(p, rest, sender)
         changed = true
     end
     if #remove > 0 then
-        local me = WP.PlayerFullName()
+        local me = PP.PlayerFullName()
         for _, name in ipairs(remove) do
             if name == me then
                 return self:OnKick(p, sender)
@@ -899,7 +899,7 @@ function Comm:OnRoster(p, rest, sender)
         end
     end
     if changed then
-        WP.UI:UpdateAll()
+        PP.UI:UpdateAll()
     end
 end
 
@@ -911,10 +911,10 @@ function Comm:SendKick(p, name)
     if p.dist ~= "MEMBERS" then
         return false, "The Shared canvas has no roster to remove anyone from."
     end
-    if not Portraits.IsOwner(p, WP.PlayerFullName()) then
+    if not Portraits.IsOwner(p, PP.PlayerFullName()) then
         return false, "Only the portrait's creator can uninvite members."
     end
-    name = WP.NormalizeName(name)
+    name = PP.NormalizeName(name)
     if not name then
         return false, "No player name given."
     end
@@ -930,7 +930,7 @@ function Comm:SendKick(p, name)
     self.pendingInvites[p.id .. ";" .. name] = nil
     Portraits.RemoveMembers(p, { name })
     self:SendRoster(p)
-    WP.UI:UpdateAll()
+    PP.UI:UpdateAll()
     return true
 end
 
@@ -943,8 +943,8 @@ function Comm:OnKick(p, sender)
     end
     local name = p.name
     if Portraits.Delete(p.id) then
-        WP.Print("You were removed from portrait '" .. name .. "' by its creator.")
-        WP.UI:UpdateAll()
+        PP.Print("You were removed from portrait '" .. name .. "' by its creator.")
+        PP.UI:UpdateAll()
     end
 end
 
@@ -963,9 +963,9 @@ function Comm:SendLockState(p, locked)
         self:FlushPaintOps()
     end
     p.locked = locked
-    p.lockedBy = locked and WP.PlayerFullName() or nil
+    p.lockedBy = locked and PP.PlayerFullName() or nil
     self:Send(p, (locked and "L" or "U") .. p.id)
-    WP.UI:UpdateAll()
+    PP.UI:UpdateAll()
 end
 
 -- Lock state is the owner's alone, in both directions. An earlier design let
@@ -980,8 +980,8 @@ function Comm:OnLock(p, sender)
     if not p.locked then
         p.locked = true
         p.lockedBy = sender
-        WP.Print("Portrait '" .. p.name .. "' was locked by " .. Ambiguate(sender, "short") .. ".")
-        WP.UI:UpdateAll()
+        PP.Print("Portrait '" .. p.name .. "' was locked by " .. Ambiguate(sender, "short") .. ".")
+        PP.UI:UpdateAll()
     end
 end
 
@@ -992,8 +992,8 @@ function Comm:OnUnlock(p, sender)
     if p.locked then
         p.locked = false
         p.lockedBy = nil
-        WP.Print("Portrait '" .. p.name .. "' was unlocked by its owner.")
-        WP.UI:UpdateAll()
+        PP.Print("Portrait '" .. p.name .. "' was unlocked by its owner.")
+        PP.UI:UpdateAll()
     end
 end
 
@@ -1001,7 +1001,7 @@ end
 -- the lock. The ops are dropped either way; only the owner can usefully say
 -- so, since only the owner's L is honored.
 function Comm:NagLocked(p, sender)
-    if not Portraits.IsOwner(p, WP.PlayerFullName()) then
+    if not Portraits.IsOwner(p, PP.PlayerFullName()) then
         return
     end
     local now = GetTime()
@@ -1018,10 +1018,10 @@ end
 ----------------------------------------------------------------------
 
 function Comm:OnMessage(prefix, text, channel, sender)
-    if prefix ~= self.PREFIX or type(text) ~= "string" or #text < 7 or not WP.db then
+    if prefix ~= self.PREFIX or type(text) ~= "string" or #text < 7 or not PP.db then
         return
     end
-    if WP.IsSelf(sender) then
+    if PP.IsSelf(sender) then
         local kind = text:sub(1, 1)
         if kind == "B" or kind == "C" then
             self:OnOwnEcho(text)
@@ -1034,7 +1034,7 @@ function Comm:OnMessage(prefix, text, channel, sender)
         return
     end
     local rest = text:sub(8)
-    sender = WP.NormalizeName(sender)
+    sender = PP.NormalizeName(sender)
     if not sender then
         return
     end
@@ -1079,7 +1079,7 @@ function Comm:OnMessage(prefix, text, channel, sender)
     end
 
     if kind == "B" then
-        if #rest == 0 or #rest % WP.OpWidth(p.size) ~= 0 then
+        if #rest == 0 or #rest % PP.OpWidth(p.size) ~= 0 then
             return
         end
         if p.locked then
@@ -1092,7 +1092,7 @@ function Comm:OnMessage(prefix, text, channel, sender)
         end
         self:ApplyOps(p, rest)
         p.rev = p.rev + 1
-        WP.UI:UpdateStatus()
+        PP.UI:UpdateStatus()
     elseif kind == "C" then
         if p.locked then
             self:NagLocked(p, sender)
@@ -1122,10 +1122,10 @@ function Comm:OnMessage(prefix, text, channel, sender)
             -- Our own unechoed batches were serialized after this clear;
             -- peers keep them, so must we.
             self:ReapplyInflightOps(p)
-            WP.UI:RedrawAll()
-            WP.UI:UpdateStatus()
+            PP.UI:RedrawAll()
+            PP.UI:UpdateStatus()
         end
-        WP.Print(Ambiguate(sender, "short") .. " cleared portrait '" .. p.name .. "'.")
+        PP.Print(Ambiguate(sender, "short") .. " cleared portrait '" .. p.name .. "'.")
     elseif kind == "H" then
         local rev = tonumber(rest:match("^:(%d+)"))
         -- Matched strictly against the whole tail, so an older client's
@@ -1156,7 +1156,7 @@ function Comm:OnMessage(prefix, text, channel, sender)
         -- chunk arrived — a stream in progress is not abandoned for this.
         local s = self.sync
         if s and s.pid == p.id and sender == s.source and s.received == 0 then
-            self:AbortSync("Canvas sync declined by source; use /wowpaint sync to retry in a moment.")
+            self:AbortSync("Canvas sync declined by source; use /pixelparty sync to retry in a moment.")
         end
     elseif kind == "M" then
         self:OnRoster(p, rest, sender)

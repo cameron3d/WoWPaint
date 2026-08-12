@@ -1,4 +1,4 @@
-# WoWPaint — Collaborative Pixel Canvas for WoW Classic / Anniversary
+# Pixel Party — Collaborative Pixel Canvas for WoW Classic / Anniversary
 
 **Date:** 2026-08-10
 **Status:** Approved by default (autonomous session — greenfield execution mode). Key alternative
@@ -42,8 +42,8 @@ than it saves, and this keeps the addon a single copy-paste folder.
 ## Architecture
 
 ```
-WoWPaint/
-  WoWPaint.toc      -- Interface 11507 (Classic Era / Anniversary 1.15.x)
+PixelParty/
+  PixelParty.toc    -- Interface 11509 (Classic Era / Anniversary 1.15.x)
   Util.lua          -- base-64 char codec, small helpers
   Canvas.lua        -- canvas data model + RLE serialize/deserialize
   Comm.lua          -- protocol, throttled send queue, snapshot sync
@@ -59,7 +59,7 @@ WoWPaint/
 - RLE codec for snapshots: runs of ≤64 encoded as 2 chars (run-1, color) from a 64-char alphabet.
   Blank canvas ≈ 128 chars; worst case 8192 chars → ~40 whisper chunks.
 
-### Wire protocol (Comm.lua) — prefix `WoWPaint`
+### Wire protocol (Comm.lua) — prefix `PixelParty`
 | Msg | Form | Direction | Meaning |
 |-----|------|-----------|---------|
 | B | `B<xyc xyc …>` (3 chars/op, ≤80 ops) | broadcast | batch of pixel ops |
@@ -96,11 +96,11 @@ Local paints apply immediately (optimistic echo), buffer up to 0.5 s / 80 ops, t
   clear is broadcast, it's collaborative), status text (channel · rev · sync state).
 
 ### Core (Core.lua)
-- SavedVariables `WoWPaintDB`: `{ cells, rev, channel, pos, dbVersion }` (account-wide, one
+- SavedVariables `PixelPartyDB`: `{ cells, rev, channel, pos, dbVersion }` (account-wide, one
   global canvas).
 - Events: `ADDON_LOADED` (DB init, prefix registration), `PLAYER_ENTERING_WORLD` (delayed hello),
   `CHAT_MSG_ADDON` (dispatch to Comm).
-- Slash: `/wowpaint` (toggle), `sync`, `clear`, `channel <auto|guild|party|raid>`, `help`.
+- Slash: `/pixelparty` (toggle), `sync`, `clear`, `channel <auto|guild|party|raid>`, `help`.
 
 ## Error handling
 - All inbound messages validated (length, alphabet, ranges) and silently dropped if malformed —
@@ -172,7 +172,7 @@ its purpose); unknown portrait ids are ignored (ids are unguessable in practice)
   Frame grows ~30 px.
 - Scope button applies to the Shared portrait only; member portraits show `Members: N` with a
   roster tooltip.
-- Slash additions: `/wowpaint new <name>`, `invite <name>`, `list`, `open <name>`,
+- Slash additions: `/pixelparty new <name>`, `invite <name>`, `list`, `open <name>`,
   `delete <name>`.
 
 ## Accepted trade-offs (v0.2)
@@ -220,7 +220,7 @@ after a confirm. Gallery entries never sync — each player curates their own co
 
 Second bottom row: **[Portrait ▸] [New] [Invite] [Lock/Unlock] [Save] [Gallery]**
 (Lock shown only to the owner of a lockable portrait; Save/Gallery always). Slash additions:
-`/wowpaint lock`, `unlock`, `save [name]`, `gallery`.
+`/pixelparty lock`, `unlock`, `save [name]`, `gallery`.
 
 ---
 
@@ -283,7 +283,7 @@ exclusive), **Gallery** on the right. All are `UISpecialFrames` (Escape closes).
 
 ## Review fixes folded in (v0.2/v0.3 code)
 
-- `/wowpaint lock` on a locked portrait unlocked it — both verbs routed to a toggle.
+- `/pixelparty lock` on a locked portrait unlocked it — both verbs routed to a toggle.
 - Queued-paint drops after a remote clear deduplicated by message *content*, so two batches
   with identical ops (paint a cell, erase it, paint it again) un-counted one `rev` instead of
   two and left the client permanently ahead of its peers. Batches now carry a send tag.
@@ -302,10 +302,10 @@ is still a local act), and any lock stronger than a convention between unmodifie
 A minimap button, hand-rolled (no LibDBIcon — the addon still ships as one folder):
 
 - **Left-click** opens the canvas, **right-click** opens the Portraits panel, **drag** moves it
-  around the ring. Angle and hidden state persist in `db.minimap`; `/wowpaint minimap` toggles
+  around the ring. Angle and hidden state persist in `db.minimap`; `/pixelparty minimap` toggles
   visibility. The tooltip names the active portrait, its member count or scope, and its lock.
-- The icon is four quads of the addon's own palette rather than an `Interface\ICONS\…` path:
-  it reads as pixel art at 16px and cannot break when Blizzard moves an icon file.
+- The initial v0.4.1 icon was four quads of the addon's own palette rather than an
+  `Interface\ICONS\…` path. v0.5.1 replaces those quads with the Pixelbrush runtime asset.
 - Creating the button costs nothing at load — it does not build the canvas frame, so the
   one-time 4096-texture hitch still waits for an actual click.
 
@@ -401,3 +401,35 @@ the new size argument, which would have raised on every login).
 - A non-Battle.net late joiner to a busy 128x128 still waits through a chat-rate snapshot;
   that is the transport's floor, not something the addon can optimise away.
 - Canvases cannot be resized after creation.
+
+---
+
+## v0.5.1 — Pixelbrush visual identity (2026-08-11)
+
+The generic four-colour minimap quadrants are replaced by an original **Pixelbrush Crest**:
+a diagonal pixel brush followed by cyan, yellow, and magenta paint cells. The storefront and
+runtime exports deliberately share a silhouette but not a single raster treatment:
+
+- `art/PixelParty-CurseForge-1024.png` is the richer square project-logo master, with a dark
+  stone medallion and restrained gold rim. It is publication art and is not shipped to WoW.
+- `Media/PixelPartyMinimap.tga` is a flat 64x64 RGBA runtime texture authored for reduction to
+  the 18px launcher interior. The existing Blizzard tracking border and hover remain intact.
+- Runtime distribution now includes the single `Media/` texture alongside the TOC and Lua
+  files. Generated sources, alternate versions, and small-size proofs stay under `art/` and
+  are excluded from the live AddOns copy.
+
+The minimap glyph is kept text-free, high-contrast, and deliberately simple. Storefront detail
+must never be automatically downscaled into the launcher; future revisions validate a 16px
+proof separately before replacing the runtime texture.
+
+---
+
+## v0.6 — Full Pixel Party identity (2026-08-11)
+
+The addon is fully renamed from its former identity to **Pixel Party**, including its package
+folder and TOC (`PixelParty/PixelParty.toc`), SavedVariables table (`PixelPartyDB`), addon-message
+prefix (`PixelParty`), public slash command (`/pixelparty`), frames, assets, documentation, and
+release metadata. This is intentionally a fresh technical identity: existing data stored under
+the former SavedVariables name is not migrated, and clients using the former wire prefix do not
+interoperate with Pixel Party. Install the addon only as `Interface/AddOns/PixelParty/`; remove
+the former addon folder to avoid loading both identities at once.

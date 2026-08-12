@@ -1,10 +1,10 @@
-local ADDON_NAME, WP = ...
+local ADDON_NAME, PP = ...
 
-local Canvas = WP.Canvas
-local Portraits = WP.Portraits
+local Canvas = PP.Canvas
+local Portraits = PP.Portraits
 
 local UI = {}
-WP.UI = UI
+PP.UI = UI
 
 local CELL = 8                      -- on-screen pixels per canvas cell
 local GRID = Canvas.DEFAULT_SIZE * CELL -- 512, the canvas widget edge
@@ -60,12 +60,20 @@ UI.undoStack = {}
 -- Static popups
 ----------------------------------------------------------------------
 
-StaticPopupDialogs["WOWPAINT_CLEAR"] = {
+-- 1.15.7 rebuilt StaticPopup on the retail dialog framework: the edit box now
+-- hangs off the dialog as .EditBox behind a :GetEditBox() accessor, and the
+-- old lowercase .editBox field is gone. Fall back to the old field so a
+-- pre-rework client still works.
+local function DialogEditBox(dialog)
+    return dialog.GetEditBox and dialog:GetEditBox() or dialog.editBox
+end
+
+StaticPopupDialogs["PIXELPARTY_CLEAR"] = {
     text = "Clear portrait '%s'? This clears it for everyone painting it.",
     button1 = YES,
     button2 = NO,
     OnAccept = function()
-        WP.Comm:SendClear(Portraits.Active())
+        PP.Comm:SendClear(Portraits.Active())
     end,
     timeout = 0,
     whileDead = true,
@@ -73,14 +81,14 @@ StaticPopupDialogs["WOWPAINT_CLEAR"] = {
     preferredIndex = 3,
 }
 
-StaticPopupDialogs["WOWPAINT_NEW"] = {
+StaticPopupDialogs["PIXELPARTY_NEW"] = {
     text = "Name the new portrait:",
     button1 = ACCEPT,
     button2 = CANCEL,
     hasEditBox = true,
     maxLetters = 24,
     OnAccept = function(self)
-        UI:CreatePortrait(self.editBox:GetText())
+        UI:CreatePortrait(DialogEditBox(self):GetText())
     end,
     EditBoxOnEnterPressed = function(self)
         local dialog = self:GetParent()
@@ -96,7 +104,7 @@ StaticPopupDialogs["WOWPAINT_NEW"] = {
     preferredIndex = 3,
 }
 
-StaticPopupDialogs["WOWPAINT_INVITE_SEND"] = {
+StaticPopupDialogs["PIXELPARTY_INVITE_SEND"] = {
     text = "Invite whom to '%s'?",
     button1 = ACCEPT,
     button2 = CANCEL,
@@ -104,12 +112,13 @@ StaticPopupDialogs["WOWPAINT_INVITE_SEND"] = {
     maxLetters = 48,
     OnShow = function(self, data)
         if data and data.prefill then
-            self.editBox:SetText(data.prefill)
-            self.editBox:HighlightText()
+            local editBox = DialogEditBox(self)
+            editBox:SetText(data.prefill)
+            editBox:HighlightText()
         end
     end,
     OnAccept = function(self)
-        UI:SendInvite(self.editBox:GetText())
+        UI:SendInvite(DialogEditBox(self):GetText())
     end,
     EditBoxOnEnterPressed = function(self)
         local dialog = self:GetParent()
@@ -125,12 +134,12 @@ StaticPopupDialogs["WOWPAINT_INVITE_SEND"] = {
     preferredIndex = 3,
 }
 
-StaticPopupDialogs["WOWPAINT_INVITE_RECV"] = {
+StaticPopupDialogs["PIXELPARTY_INVITE_RECV"] = {
     text = "%s invites you to paint portrait '%s'. Join?",
     button1 = ACCEPT,
     button2 = DECLINE,
     OnAccept = function(self, data)
-        WP.Comm:AcceptInvite(data)
+        PP.Comm:AcceptInvite(data)
     end,
     timeout = 60,
     whileDead = true,
@@ -138,7 +147,7 @@ StaticPopupDialogs["WOWPAINT_INVITE_RECV"] = {
     preferredIndex = 3,
 }
 
-StaticPopupDialogs["WOWPAINT_UNINVITE"] = {
+StaticPopupDialogs["PIXELPARTY_UNINVITE"] = {
     text = "Remove %s from this portrait? Their copy is deleted and they can no longer paint it.",
     button1 = YES,
     button2 = NO,
@@ -151,7 +160,7 @@ StaticPopupDialogs["WOWPAINT_UNINVITE"] = {
     preferredIndex = 3,
 }
 
-StaticPopupDialogs["WOWPAINT_SAVE"] = {
+StaticPopupDialogs["PIXELPARTY_SAVE"] = {
     text = "Save to gallery as:",
     button1 = ACCEPT,
     button2 = CANCEL,
@@ -159,11 +168,12 @@ StaticPopupDialogs["WOWPAINT_SAVE"] = {
     maxLetters = 24,
     OnShow = function(self)
         local p = Portraits.Active()
-        self.editBox:SetText(p and p.name or "")
-        self.editBox:HighlightText()
+        local editBox = DialogEditBox(self)
+        editBox:SetText(p and p.name or "")
+        editBox:HighlightText()
     end,
     OnAccept = function(self)
-        UI:SaveToGallery(self.editBox:GetText())
+        UI:SaveToGallery(DialogEditBox(self):GetText())
     end,
     EditBoxOnEnterPressed = function(self)
         local dialog = self:GetParent()
@@ -179,7 +189,7 @@ StaticPopupDialogs["WOWPAINT_SAVE"] = {
     preferredIndex = 3,
 }
 
-StaticPopupDialogs["WOWPAINT_GALLERY_DELETE"] = {
+StaticPopupDialogs["PIXELPARTY_GALLERY_DELETE"] = {
     text = "Delete gallery entry '%s'?",
     button1 = YES,
     button2 = NO,
@@ -192,13 +202,13 @@ StaticPopupDialogs["WOWPAINT_GALLERY_DELETE"] = {
     preferredIndex = 3,
 }
 
-StaticPopupDialogs["WOWPAINT_DELETE_PORTRAIT"] = {
+StaticPopupDialogs["PIXELPARTY_DELETE_PORTRAIT"] = {
     text = "Remove portrait '%s' from this character? (Other members keep their copies.)",
     button1 = YES,
     button2 = NO,
     OnAccept = function(self, data)
         if Portraits.Delete(data.id) then
-            WP.Print("Portrait removed.")
+            PP.Print("Portrait removed.")
             UI:UpdateAll()
         end
     end,
@@ -217,15 +227,15 @@ function UI:EnsureFrame()
         return
     end
 
-    self.tool = TOOL_BY_ID[WP.db.tool] and WP.db.tool or "PENCIL"
-    self.brushSize = WP.db.brushSize or 1
-    self.selectedColor = WP.db.color or self.selectedColor
+    self.tool = TOOL_BY_ID[PP.db.tool] and PP.db.tool or "PENCIL"
+    self.brushSize = PP.db.brushSize or 1
+    self.selectedColor = PP.db.color or self.selectedColor
     -- LayoutViewport re-validates the zoom against the active canvas, so a
     -- stale saved value cannot leave the grid in an impossible state.
-    self.zoom = WP.db.zoom or CELL
+    self.zoom = PP.db.zoom or CELL
     self.panX, self.panY = 1, 1
 
-    local f = CreateFrame("Frame", "WoWPaintFrame", UIParent, "BackdropTemplate")
+    local f = CreateFrame("Frame", "PixelPartyFrame", UIParent, "BackdropTemplate")
     self.frame = f
     -- CreateFrame returns a shown frame; start hidden so Toggle's first
     -- IsShown() check takes the Show() path and OnShow actually fires.
@@ -241,7 +251,7 @@ function UI:EnsureFrame()
     f:SetScript("OnDragStop", function(frame)
         frame:StopMovingOrSizing()
         local point, _, relPoint, x, y = frame:GetPoint(1)
-        WP.db.pos = { point = point, relPoint = relPoint, x = x, y = y }
+        PP.db.pos = { point = point, relPoint = relPoint, x = x, y = y }
     end)
     f:SetBackdrop({
         bgFile = "Interface\\DialogFrame\\UI-DialogBox-Background-Dark",
@@ -252,7 +262,7 @@ function UI:EnsureFrame()
         insets = { left = 11, right = 12, top = 12, bottom = 11 },
     })
 
-    local pos = WP.db.pos
+    local pos = PP.db.pos
     if pos and pos.point then
         f:SetPoint(pos.point, UIParent, pos.relPoint or pos.point, pos.x or 0, pos.y or 0)
     else
@@ -273,7 +283,7 @@ function UI:EnsureFrame()
     self:BuildPickerPanel(f)
     self:BuildMembersPanel(f)
 
-    tinsert(UISpecialFrames, "WoWPaintFrame")
+    tinsert(UISpecialFrames, "PixelPartyFrame")
 
     -- The picker floats free of this window, so it has to be re-anchored
     -- whenever the canvas appears or disappears underneath it.
@@ -282,7 +292,7 @@ function UI:EnsureFrame()
             UI:AnchorPicker()
         end
         UI:UpdateAll()
-        WP.Comm:SendHello(Portraits.Active(), false)
+        PP.Comm:SendHello(Portraits.Active(), false)
     end)
     f:SetScript("OnHide", function()
         if UI.picker:IsShown() then
@@ -332,7 +342,7 @@ function UI:BuildToolbar(f)
     self.sizeBtn:SetPoint("LEFT", bar, "LEFT", x, 0)
     self.sizeBtn:SetScript("OnClick", function()
         UI.brushSize = UI.brushSize % 3 + 1
-        WP.db.brushSize = UI.brushSize
+        PP.db.brushSize = UI.brushSize
         UI:UpdateButtons()
     end)
     Tooltip(self.sizeBtn, "Brush size", "Freehand nib width, 1 to 3 cells.")
@@ -353,7 +363,7 @@ function UI:BuildToolbar(f)
     self.gridBtn:SetPoint("LEFT", bar, "LEFT", x, 0)
     self.gridBtn:SetText("Grid")
     self.gridBtn:SetScript("OnClick", function()
-        WP.db.showGrid = not WP.db.showGrid
+        PP.db.showGrid = not PP.db.showGrid
         UI:UpdateGrid()
         UI:UpdateButtons()
     end)
@@ -366,7 +376,7 @@ function UI:SetTool(id)
     end
     self:ClearPreview()
     self.tool = id
-    WP.db.tool = id
+    PP.db.tool = id
     self:UpdateButtons()
 end
 
@@ -408,8 +418,8 @@ end
 
 function UI:SelectColor(c)
     self.selectedColor = c
-    if WP.db then
-        WP.db.color = c
+    if PP.db then
+        PP.db.color = c
     end
     for i, ring in pairs(self.rings) do
         ring:SetShown(i == c)
@@ -482,7 +492,7 @@ function UI:LayoutViewport()
         return
     end
     local size = self:CurrentSize()
-    local zooms = WP.ZoomList(size, GRID)
+    local zooms = PP.ZoomList(size, GRID)
     local valid = false
     for _, z in ipairs(zooms) do
         if z == self.zoom then
@@ -493,10 +503,10 @@ function UI:LayoutViewport()
         self.zoom = zooms[1]
     end
 
-    local n = WP.VisibleCells(size, self.zoom, GRID)
+    local n = PP.VisibleCells(size, self.zoom, GRID)
     self.visible = n
-    self.panX = WP.ClampPan(size, n, self.panX)
-    self.panY = WP.ClampPan(size, n, self.panY)
+    self.panX = PP.ClampPan(size, n, self.panX)
+    self.panY = PP.ClampPan(size, n, self.panY)
     -- Repositioning every slot is O(visible^2); UpdateAll runs on every
     -- roster message, so skip the work unless the layout actually changed.
     local key = size .. ":" .. self.zoom
@@ -535,7 +545,7 @@ end
 
 -- The texture showing a canvas cell, or nil when it is scrolled out of sight.
 function UI:SlotFor(x, y)
-    local col, row = WP.CanvasToView(self.panX, self.panY, self.visible or 0, x, y)
+    local col, row = PP.CanvasToView(self.panX, self.panY, self.visible or 0, x, y)
     if not col then
         return nil
     end
@@ -548,7 +558,7 @@ function UI:StepZoom(dir)
         return
     end
     local size = self:CurrentSize()
-    local zooms = WP.ZoomList(size, GRID)
+    local zooms = PP.ZoomList(size, GRID)
     local idx = 1
     for i, z in ipairs(zooms) do
         if z == self.zoom then
@@ -562,11 +572,11 @@ function UI:StepZoom(dir)
     -- Keep whatever is under the cursor roughly in view across the change.
     local ax, ay = self:CellFromCursor(true)
     self.zoom = zooms[target]
-    WP.db.zoom = self.zoom
+    PP.db.zoom = self.zoom
     self:LayoutViewport()
     if ax then
-        self.panX = WP.ClampPan(size, self.visible, ax - math.floor(self.visible / 2))
-        self.panY = WP.ClampPan(size, self.visible, ay - math.floor(self.visible / 2))
+        self.panX = PP.ClampPan(size, self.visible, ax - math.floor(self.visible / 2))
+        self.panY = PP.ClampPan(size, self.visible, ay - math.floor(self.visible / 2))
     end
     self:RedrawAll()
     self:UpdateButtons()
@@ -589,8 +599,8 @@ function UI:DragPan()
     local size = self:CurrentSize()
     -- Grab-the-canvas: dragging right reveals what is to the left. Screen y
     -- grows upward, canvas rows grow downward, hence the flipped signs.
-    local nx = WP.ClampPan(size, self.visible, d.px + math.floor((d.cx - cx) / self.zoom + 0.5))
-    local ny = WP.ClampPan(size, self.visible, d.py + math.floor((cy - d.cy) / self.zoom + 0.5))
+    local nx = PP.ClampPan(size, self.visible, d.px + math.floor((d.cx - cx) / self.zoom + 0.5))
+    local ny = PP.ClampPan(size, self.visible, d.py + math.floor((cy - d.cy) / self.zoom + 0.5))
     if nx ~= self.panX or ny ~= self.panY then
         self.panX, self.panY = nx, ny
         self:RedrawAll()
@@ -604,7 +614,7 @@ function UI:UpdateGrid()
         return
     end
     self.gridTex = self.gridTex or {}
-    local want = WP.db.showGrid and true or false
+    local want = PP.db.showGrid and true or false
     local zoom, off = self.zoom, self.viewOffset or 0
     local span = self.visible * zoom
     local needed = want and (self.visible - 1) or 0
@@ -661,7 +671,7 @@ function UI:CellFromCursor(clamp)
         col = math.min(n, math.max(1, col))
         row = math.min(n, math.max(1, row))
     end
-    return WP.ViewToCanvas(self.panX, self.panY, col, row)
+    return PP.ViewToCanvas(self.panX, self.panY, col, row)
 end
 
 -- Every write to the canvas funnels through here so undo sees all of it.
@@ -677,7 +687,7 @@ function UI:Apply(p, x, y, color)
     if self.undoScratch then
         self.undoScratch[#self.undoScratch + 1] = { i, p.cells[i] }
     end
-    WP.Comm:Paint(p, x, y, color)
+    PP.Comm:Paint(p, x, y, color)
 end
 
 function UI:ApplyBrush(p, x, y, color)
@@ -796,7 +806,7 @@ function UI:Stroke(p, x, y)
         end
         -- Fill in cells a fast drag skipped between two OnUpdate samples.
         local color = self.paintColor
-        WP.ForLine(last[1], last[2], x, y, function(px, py)
+        PP.ForLine(last[1], last[2], x, y, function(px, py)
             UI:ApplyBrush(p, px, py, color)
         end)
     else
@@ -816,11 +826,11 @@ function UI:ShapeCells(x, y)
         list[#list + 1] = { px, py }
     end
     if self.tool == "LINE" then
-        WP.ForLine(a[1], a[2], x, y, add)
+        PP.ForLine(a[1], a[2], x, y, add)
     elseif self.tool == "RECT" then
-        WP.ForRect(a[1], a[2], x, y, filled, add)
+        PP.ForRect(a[1], a[2], x, y, filled, add)
     elseif self.tool == "CIRCLE" then
-        WP.ForEllipse(a[1], a[2], x, y, filled, add)
+        PP.ForEllipse(a[1], a[2], x, y, filled, add)
     end
     return list
 end
@@ -896,7 +906,7 @@ function UI:Undo()
     end
     local idx = self:UndoIndex()
     if not idx then
-        WP.Print("Nothing to undo on '" .. p.name .. "'.")
+        PP.Print("Nothing to undo on '" .. p.name .. "'.")
         return
     end
     local entry = table.remove(self.undoStack, idx)
@@ -904,7 +914,7 @@ function UI:Undo()
     -- on the colour it had before the action started.
     for i = #entry.cells, 1, -1 do
         local x, y = Canvas.Coords(p.size, entry.cells[i][1])
-        WP.Comm:Paint(p, x, y, entry.cells[i][2])
+        PP.Comm:Paint(p, x, y, entry.cells[i][2])
     end
     self:UpdateButtons()
 end
@@ -954,10 +964,10 @@ function UI:BuildBottomBars(f)
     zoomBtn:SetPoint("BOTTOMLEFT", f, "BOTTOMLEFT", 130, 14)
     zoomBtn:SetScript("OnClick", function()
         -- Cycle inwards, wrapping back to the fit level.
-        local zooms = WP.ZoomList(UI:CurrentSize(), GRID)
+        local zooms = PP.ZoomList(UI:CurrentSize(), GRID)
         if UI.zoom == zooms[#zooms] then
             UI.zoom = zooms[1]
-            WP.db.zoom = UI.zoom
+            PP.db.zoom = UI.zoom
             UI:LayoutViewport()
             UI:RedrawAll()
             UI:UpdateButtons()
@@ -976,7 +986,7 @@ function UI:BuildBottomBars(f)
     clearBtn:SetScript("OnClick", function()
         local p = Portraits.Active()
         if p and not p.locked and not UI.galleryView then
-            StaticPopup_Show("WOWPAINT_CLEAR", p.name)
+            StaticPopup_Show("PIXELPARTY_CLEAR", p.name)
         end
     end)
 
@@ -1003,7 +1013,7 @@ function UI:BuildBottomBars(f)
     end)
     Tooltip(self.portraitBtn, "Portraits", "Pick which canvas you are painting.")
     self.newBtn = rowBtn(50, "New", function()
-        StaticPopup_Show("WOWPAINT_NEW")
+        StaticPopup_Show("PIXELPARTY_NEW")
     end)
     self.inviteBtn = rowBtn(60, "Invite", function()
         UI:OnInviteClick()
@@ -1040,7 +1050,7 @@ function UI:BuildBottomBars(f)
         local p = Portraits.Active()
         GameTooltip:SetOwner(btn, "ANCHOR_TOP")
         GameTooltip:AddLine(p and p.locked and "Unlock" or "Lock")
-        if p and not Portraits.IsOwner(p, WP.PlayerFullName()) then
+        if p and not Portraits.IsOwner(p, PP.PlayerFullName()) then
             GameTooltip:AddLine("Only the portrait's creator can lock or unlock it.", 1, 1, 1, true)
         else
             GameTooltip:AddLine("Freezes the portrait for everyone: no painting, no clearing, until you unlock it. Inviting still works, which is how you share finished art.",
@@ -1053,7 +1063,7 @@ function UI:BuildBottomBars(f)
     end)
     self.saveBtn = rowBtn(50, "Save", function()
         if not UI.galleryView then
-            StaticPopup_Show("WOWPAINT_SAVE")
+            StaticPopup_Show("PIXELPARTY_SAVE")
         end
     end)
     self.galleryBtn = rowBtn(64, "Gallery", function()
@@ -1132,7 +1142,7 @@ end
 function UI:BuildGalleryPanel(f)
     -- Taller than the other panels: 8 rows plus the pager plus the Back
     -- control, which only appears while an entry is open read-only.
-    local g = BuildPanel(f, "WoWPaintGalleryFrame", "Gallery", 300, 500, "RIGHT")
+    local g = BuildPanel(f, "PixelPartyGalleryFrame", "Gallery", 300, 500, "RIGHT")
     self.gallery = g
 
     g:SetScript("OnHide", function()
@@ -1198,7 +1208,7 @@ function UI:RefreshGallery()
     if not self.gallery or not self.gallery:IsShown() then
         return
     end
-    local entries = WP.db.gallery
+    local entries = PP.db.gallery
     local pages = math.max(1, math.ceil(#entries / GALLERY_ROWS))
     if self.galleryPage > pages then
         self.galleryPage = pages
@@ -1217,7 +1227,7 @@ function UI:RefreshGallery()
                 UI:UpdateAll()
             end)
             row.delBtn:SetScript("OnClick", function()
-                StaticPopup_Show("WOWPAINT_GALLERY_DELETE", entry.name, nil, { index = index })
+                StaticPopup_Show("PIXELPARTY_GALLERY_DELETE", entry.name, nil, { index = index })
             end)
         else
             row:Hide()
@@ -1233,7 +1243,7 @@ function UI:SaveToGallery(name)
         return
     end
     local entry = Portraits.SaveToGallery(p, name)
-    WP.Print("Saved '" .. entry.name .. "' to your gallery.")
+    PP.Print("Saved '" .. entry.name .. "' to your gallery.")
     self:RefreshGallery()
 end
 
@@ -1253,7 +1263,7 @@ end
 function UI:BuildPickerPanel(f)
     -- Floating: this is also what the minimap button opens, and it has to
     -- work as a launcher with the canvas window closed.
-    local g = BuildPanel(f, "WoWPaintPortraitsFrame", "Portraits", 300, 440, "FLOAT")
+    local g = BuildPanel(f, "PixelPartyPortraitsFrame", "Portraits", 300, 440, "FLOAT")
     self.picker = g
 
     self.pickerRows = {}
@@ -1308,7 +1318,7 @@ function UI:BuildPickerPanel(f)
     newBtn:SetPoint("BOTTOM", g, "BOTTOM", -68, 42)
     newBtn:SetText("New portrait")
     newBtn:SetScript("OnClick", function()
-        StaticPopup_Show("WOWPAINT_NEW")
+        StaticPopup_Show("PIXELPARTY_NEW")
     end)
 
     -- Size belongs here rather than in the name popup: StaticPopup's second
@@ -1321,11 +1331,11 @@ function UI:BuildPickerPanel(f)
         local sizes = Canvas.SIZES
         local idx = 1
         for i, s in ipairs(sizes) do
-            if s == WP.db.newSize then
+            if s == PP.db.newSize then
                 idx = i
             end
         end
-        WP.db.newSize = sizes[idx % #sizes + 1]
+        PP.db.newSize = sizes[idx % #sizes + 1]
         UI:RefreshPicker()
     end)
     Tooltip(sizeBtn, "Size of the next new portrait",
@@ -1391,7 +1401,7 @@ function UI:RefreshPicker()
             if p.dist == "MEMBERS" then
                 local n = #(p.members or {})
                 row.sub:SetText(("%s  -  %d member%s%s"):format(dims, n, n == 1 and "" or "s",
-                    Portraits.IsOwner(p, WP.PlayerFullName()) and ", yours" or ""))
+                    Portraits.IsOwner(p, PP.PlayerFullName()) and ", yours" or ""))
             else
                 row.sub:SetText(("%s  -  shared, %s"):format(dims, CHANNEL_LABELS[p.dist] or p.dist))
             end
@@ -1401,7 +1411,7 @@ function UI:RefreshPicker()
             end)
             row.delBtn:SetEnabled(p.id ~= Portraits.SHARED_ID)
             row.delBtn:SetScript("OnClick", function()
-                StaticPopup_Show("WOWPAINT_DELETE_PORTRAIT", p.name, nil, { id = p.id })
+                StaticPopup_Show("PIXELPARTY_DELETE_PORTRAIT", p.name, nil, { id = p.id })
             end)
         else
             row:Hide()
@@ -1409,7 +1419,7 @@ function UI:RefreshPicker()
     end
     self.pickerPageText:SetText(("Page %d / %d  -  %d portrait%s"):format(
         page, pages, #list, #list == 1 and "" or "s"))
-    self.pickerSizeBtn:SetText(("New size: %d"):format(WP.db.newSize))
+    self.pickerSizeBtn:SetText(("New size: %d"):format(PP.db.newSize))
     self.pickerCanvasBtn:SetEnabled(not self.frame:IsShown())
 end
 
@@ -1424,8 +1434,8 @@ function UI:OpenPortrait(id)
     -- minimap launcher with the canvas closed.
     self.frame:Show()
     self:UpdateAll()
-    WP.Comm:SendHello(p, false)
-    WP.Print("Now painting '" .. p.name .. "'.")
+    PP.Comm:SendHello(p, false)
+    PP.Print("Now painting '" .. p.name .. "'.")
 end
 
 ----------------------------------------------------------------------
@@ -1433,7 +1443,7 @@ end
 ----------------------------------------------------------------------
 
 function UI:BuildMembersPanel(f)
-    local g = BuildPanel(f, "WoWPaintMembersFrame", "Members", 300, 410, "LEFT")
+    local g = BuildPanel(f, "PixelPartyMembersFrame", "Members", 300, 410, "LEFT")
     self.members = g
 
     self.memberRows = {}
@@ -1472,7 +1482,7 @@ end
 function UI:ToggleMembers()
     local p = Portraits.Active()
     if not p or p.dist ~= "MEMBERS" then
-        WP.Print("The Shared canvas has no roster - everyone in your scope already paints it. Create a portrait to invite people.")
+        PP.Print("The Shared canvas has no roster - everyone in your scope already paints it. Create a portrait to invite people.")
         return
     end
     if self.members:IsShown() then
@@ -1495,7 +1505,7 @@ function UI:RefreshMembers()
         return
     end
     local roster = p.members or {}
-    local iAmOwner = Portraits.IsOwner(p, WP.PlayerFullName())
+    local iAmOwner = Portraits.IsOwner(p, PP.PlayerFullName())
     local pages = math.max(1, math.ceil(#roster / MEMBER_ROWS))
     if self.memberPage > pages then
         self.memberPage = pages
@@ -1511,7 +1521,7 @@ function UI:RefreshMembers()
             local label = Ambiguate(name, "short")
             if isOwner then
                 label = label .. "  |cff9d9d9d(creator)|r"
-            elseif name == WP.PlayerFullName() then
+            elseif name == PP.PlayerFullName() then
                 label = label .. "  |cff9d9d9d(you)|r"
             end
             row.text:SetText(label)
@@ -1536,20 +1546,20 @@ function UI:Uninvite(name)
     if not p then
         return
     end
-    local full = WP.NormalizeName(name)
+    local full = PP.NormalizeName(name)
     if not full then
-        WP.Print("Who should be removed? /wowpaint uninvite <player>")
+        PP.Print("Who should be removed? /pixelparty uninvite <player>")
         return
     end
-    if not Portraits.IsOwner(p, WP.PlayerFullName()) then
-        WP.Print("Only the portrait's creator can uninvite members.")
+    if not Portraits.IsOwner(p, PP.PlayerFullName()) then
+        PP.Print("Only the portrait's creator can uninvite members.")
         return
     end
     if not Portraits.IsMember(p, full) then
-        WP.Print(Ambiguate(full, "short") .. " is not a member of '" .. p.name .. "'.")
+        PP.Print(Ambiguate(full, "short") .. " is not a member of '" .. p.name .. "'.")
         return
     end
-    StaticPopup_Show("WOWPAINT_UNINVITE", Ambiguate(full, "short"), nil, { name = full })
+    StaticPopup_Show("PIXELPARTY_UNINVITE", Ambiguate(full, "short"), nil, { name = full })
 end
 
 function UI:DoUninvite(name)
@@ -1557,11 +1567,11 @@ function UI:DoUninvite(name)
     if not p then
         return
     end
-    local ok, err = WP.Comm:SendKick(p, name)
+    local ok, err = PP.Comm:SendKick(p, name)
     if ok then
-        WP.Print("Removed " .. Ambiguate(name, "short") .. " from '" .. p.name .. "'.")
+        PP.Print("Removed " .. Ambiguate(name, "short") .. " from '" .. p.name .. "'.")
     else
-        WP.Print(err or "Could not remove that member.")
+        PP.Print(err or "Could not remove that member.")
     end
 end
 
@@ -1572,17 +1582,17 @@ end
 function UI:CreatePortrait(name)
     name = Portraits.SanitizeName(name)
     if name == "" then
-        WP.Print("Give the portrait a name.")
+        PP.Print("Give the portrait a name.")
         return
     end
     if Portraits.FindByName(name) then
-        WP.Print("You already have a portrait named '" .. name .. "'.")
+        PP.Print("You already have a portrait named '" .. name .. "'.")
         return
     end
-    local p = Portraits.Create(name, "MEMBERS", nil, WP.PlayerFullName(), WP.db.newSize)
+    local p = Portraits.Create(name, "MEMBERS", nil, PP.PlayerFullName(), PP.db.newSize)
     Portraits.SetActive(p.id)
     self.panX, self.panY = 1, 1
-    WP.Print(("Created portrait '%s' (%dx%d). Use Invite to bring in painters."):format(
+    PP.Print(("Created portrait '%s' (%dx%d). Use Invite to bring in painters."):format(
         p.name, p.size, p.size))
     self:UpdateAll()
 end
@@ -1590,14 +1600,14 @@ end
 function UI:OnInviteClick()
     local p = Portraits.Active()
     if not p or p.dist ~= "MEMBERS" then
-        WP.Print("The Shared canvas has no roster - everyone in your scope already paints it. Create a portrait to invite people.")
+        PP.Print("The Shared canvas has no roster - everyone in your scope already paints it. Create a portrait to invite people.")
         return
     end
     local prefill = ""
     if UnitIsPlayer("target") and UnitIsFriend("player", "target") then
         prefill = GetUnitName("target", true) or ""
     end
-    StaticPopup_Show("WOWPAINT_INVITE_SEND", p.name, nil, { prefill = prefill })
+    StaticPopup_Show("PIXELPARTY_INVITE_SEND", p.name, nil, { prefill = prefill })
 end
 
 function UI:SendInvite(name)
@@ -1605,11 +1615,11 @@ function UI:SendInvite(name)
     if not p then
         return
     end
-    local ok, err = WP.Comm:SendInvite(p, name)
+    local ok, err = PP.Comm:SendInvite(p, name)
     if ok then
-        WP.Print("Invited " .. name .. " to '" .. p.name .. "'.")
+        PP.Print("Invited " .. name .. " to '" .. p.name .. "'.")
     else
-        WP.Print(err or "Could not send the invite.")
+        PP.Print(err or "Could not send the invite.")
     end
 end
 
@@ -1621,25 +1631,25 @@ function UI:OnLockClick(desired)
         return
     end
     if not Portraits.Lockable(p) then
-        WP.Print("The Shared canvas cannot be locked - create a portrait for work you want to freeze.")
+        PP.Print("The Shared canvas cannot be locked - create a portrait for work you want to freeze.")
         return
     end
-    if not Portraits.IsOwner(p, WP.PlayerFullName()) then
-        WP.Print("Only the portrait's creator can lock or unlock it.")
+    if not Portraits.IsOwner(p, PP.PlayerFullName()) then
+        PP.Print("Only the portrait's creator can lock or unlock it.")
         return
     end
     if desired == nil then
         desired = not p.locked
     end
     if desired == p.locked then
-        WP.Print(("'%s' is already %s."):format(p.name, desired and "locked" or "unlocked"))
+        PP.Print(("'%s' is already %s."):format(p.name, desired and "locked" or "unlocked"))
         return
     end
-    WP.Comm:SendLockState(p, desired)
+    PP.Comm:SendLockState(p, desired)
 end
 
 function UI:ShowInvitePopup(data)
-    StaticPopup_Show("WOWPAINT_INVITE_RECV", Ambiguate(data.from, "short"), data.name, data)
+    StaticPopup_Show("PIXELPARTY_INVITE_RECV", Ambiguate(data.from, "short"), data.name, data)
 end
 
 function UI:OnScopeClick()
@@ -1702,7 +1712,7 @@ function UI:RedrawAll()
         for col = 1, self.visible do
             local t = r and r[col]
             if t then
-                local x, y = WP.ViewToCanvas(self.panX, self.panY, col, row)
+                local x, y = PP.ViewToCanvas(self.panX, self.panY, col, row)
                 local rgb = Canvas.PALETTE[cells[Canvas.Index(size, x, y)]] or Canvas.PALETTE[0]
                 t:SetColorTexture(rgb[1], rgb[2], rgb[3])
             end
@@ -1725,8 +1735,8 @@ function UI:UpdateStatus()
         return
     end
     local text
-    if WP.Comm.sync and WP.Comm.sync.pid == p.id then
-        text = "Syncing canvas from " .. Ambiguate(WP.Comm.sync.source, "short") .. "..."
+    if PP.Comm.sync and PP.Comm.sync.pid == p.id then
+        text = "Syncing canvas from " .. Ambiguate(PP.Comm.sync.source, "short") .. "..."
     elseif p.locked then
         text = "|cffffcc00Locked|r by " .. (p.lockedBy and Ambiguate(p.lockedBy, "short") or "owner")
             .. "  -  rev " .. p.rev
@@ -1735,7 +1745,7 @@ function UI:UpdateStatus()
         local others = math.max(0, #(p.members or {}) - 1)
         text = ("Whispering %d member%s  -  rev %d"):format(others, others == 1 and "" or "s", p.rev)
     else
-        local chatType = WP.Comm:GetScopeChannel(p.dist)
+        local chatType = PP.Comm:GetScopeChannel(p.dist)
         if chatType then
             text = ("Broadcasting to %s  -  rev %d"):format(CHANNEL_LABELS[chatType] or chatType, p.rev)
         else
@@ -1754,7 +1764,7 @@ function UI:UpdateButtons()
     if not p then
         return
     end
-    local me = WP.PlayerFullName()
+    local me = PP.PlayerFullName()
     local viewing = self.galleryView ~= nil
     local paintable = not viewing and not p.locked
 
@@ -1792,7 +1802,7 @@ function UI:UpdateButtons()
         self.zoomBtn:SetText(("Zoom %dpx"):format(self.zoom or CELL))
     end
     self.undoBtn:SetEnabled(paintable and self:UndoIndex() ~= nil)
-    if WP.db.showGrid then
+    if PP.db.showGrid then
         self.gridBtn:LockHighlight()
     else
         self.gridBtn:UnlockHighlight()
@@ -1809,7 +1819,7 @@ function UI:UpdateTitle()
     end
     local p = Portraits.Active()
     if p then
-        self.title:SetText("WoWPaint - " .. p.name .. (p.locked and "  (locked)" or ""))
+        self.title:SetText("Pixel Party - " .. p.name .. (p.locked and "  (locked)" or ""))
     end
 end
 
@@ -1851,7 +1861,7 @@ function UI:PositionMinimapButton()
     if not b then
         return
     end
-    local angle = math.rad(WP.db.minimap.angle or 200)
+    local angle = math.rad(PP.db.minimap.angle or 200)
     b:ClearAllPoints()
     b:SetPoint("CENTER", Minimap, "CENTER",
         math.cos(angle) * MINIMAP_RADIUS, math.sin(angle) * MINIMAP_RADIUS)
@@ -1864,7 +1874,7 @@ local function DragUpdate()
     end
     local scale = Minimap:GetEffectiveScale()
     local cx, cy = GetCursorPosition()
-    WP.db.minimap.angle = math.deg(atan2(cy / scale - my, cx / scale - mx)) % 360
+    PP.db.minimap.angle = math.deg(atan2(cy / scale - my, cx / scale - mx)) % 360
     UI:PositionMinimapButton()
 end
 
@@ -1872,7 +1882,7 @@ function UI:EnsureMinimapButton()
     if self.minimapBtn or not Minimap then
         return
     end
-    local b = CreateFrame("Button", "WoWPaintMinimapButton", Minimap)
+    local b = CreateFrame("Button", "PixelPartyMinimapButton", Minimap)
     self.minimapBtn = b
     b:SetSize(31, 31)
     b:SetFrameStrata("MEDIUM")
@@ -1881,17 +1891,12 @@ function UI:EnsureMinimapButton()
     b:RegisterForDrag("LeftButton")
     b:SetMovable(true)
 
-    -- The icon is four quads of the addon's own palette rather than an art
-    -- path: it reads as pixel art at this size, and it cannot break when
-    -- Blizzard moves an icon file.
-    for i, colorIndex in ipairs({ 5, 8, 10, 13 }) do
-        local t = b:CreateTexture(nil, "ARTWORK")
-        local col = Canvas.PALETTE[colorIndex]
-        t:SetColorTexture(col[1], col[2], col[3])
-        t:SetSize(8, 8)
-        t:SetPoint("TOPLEFT", b, "TOPLEFT",
-            7 + ((i - 1) % 2) * 8, -6 - math.floor((i - 1) / 2) * 8)
-    end
+    -- The launcher uses a separately authored small-size glyph rather than a
+    -- shrunken storefront logo. Keep Blizzard's tracking border around it.
+    local icon = b:CreateTexture(nil, "ARTWORK")
+    icon:SetTexture("Interface\\AddOns\\PixelParty\\Media\\PixelPartyMinimap.tga")
+    icon:SetSize(18, 18)
+    icon:SetPoint("CENTER", b, "CENTER", 0, 1)
 
     local border = b:CreateTexture(nil, "OVERLAY")
     border:SetTexture("Interface\\Minimap\\MiniMap-TrackingBorder")
@@ -1917,7 +1922,7 @@ function UI:EnsureMinimapButton()
     b:SetScript("OnEnter", function(self)
         local p = Portraits.Active()
         GameTooltip:SetOwner(self, "ANCHOR_LEFT")
-        GameTooltip:AddLine("WoWPaint")
+        GameTooltip:AddLine("Pixel Party")
         if p then
             local sub
             if p.dist == "MEMBERS" then
@@ -1939,15 +1944,15 @@ function UI:EnsureMinimapButton()
     end)
 
     self:PositionMinimapButton()
-    b:SetShown(not WP.db.minimap.hide)
+    b:SetShown(not PP.db.minimap.hide)
 end
 
 function UI:ToggleMinimapButton()
-    WP.db.minimap.hide = not WP.db.minimap.hide
+    PP.db.minimap.hide = not PP.db.minimap.hide
     if self.minimapBtn then
-        self.minimapBtn:SetShown(not WP.db.minimap.hide)
+        self.minimapBtn:SetShown(not PP.db.minimap.hide)
     end
-    WP.Print(WP.db.minimap.hide
-        and "Minimap button hidden - /wowpaint minimap brings it back."
+    PP.Print(PP.db.minimap.hide
+        and "Minimap button hidden - /pixelparty minimap brings it back."
         or "Minimap button shown.")
 end

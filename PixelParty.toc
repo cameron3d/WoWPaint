@@ -1,9 +1,9 @@
-## Interface: 11507
-## Title: WoWPaint
+## Interface: 11509
+## Title: Pixel Party
 ## Notes: Collaborative pixel painting: shared canvases, invite-only portraits, drawing tools, and a gallery.
-## Version: 0.5.0
-## SavedVariables: WoWPaintDB
-## X-Website: https://github.com/cameron3d/WoWPaint
+## Version: 0.6.0
+## SavedVariables: PixelPartyDB
+## IconTexture: Interface\AddOns\PixelParty\Media\PixelPartyMinimap.tga
 ## X-Category: Miscellaneous
 
 Util.lua

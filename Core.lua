@@ -1,12 +1,12 @@
-local ADDON_NAME, WP = ...
+local ADDON_NAME, PP = ...
 
-local Canvas = WP.Canvas
-local Portraits = WP.Portraits
+local Canvas = PP.Canvas
+local Portraits = PP.Portraits
 
 local VALID_SCOPES = { AUTO = true, GUILD = true, PARTY = true, RAID = true }
 
-function WP.Print(msg)
-    DEFAULT_CHAT_FRAME:AddMessage("|cff7ec0eeWoWPaint:|r " .. tostring(msg))
+function PP.Print(msg)
+    DEFAULT_CHAT_FRAME:AddMessage("|cff7ec0eePixel Party:|r " .. tostring(msg))
 end
 
 local function SanitizeCells(cells, size)
@@ -80,8 +80,8 @@ local function SanitizePortrait(id, p)
 end
 
 local function InitDB()
-    WoWPaintDB = WoWPaintDB or {}
-    local db = WoWPaintDB
+    PixelPartyDB = PixelPartyDB or {}
+    local db = PixelPartyDB
 
     if (db.dbVersion or 0) < 2 then
         -- v1 -> v2: fold the single canvas into the built-in Shared portrait.
@@ -163,7 +163,7 @@ local function InitDB()
         db.minimap.angle = 200
     end
     db.minimap.hide = db.minimap.hide == true
-    WP.db = db
+    PP.db = db
 end
 
 local events = CreateFrame("Frame")
@@ -179,10 +179,10 @@ events:SetScript("OnEvent", function(_, event, ...)
         local name = ...
         if name == ADDON_NAME then
             InitDB()
-            WP.Comm:Init()
+            PP.Comm:Init()
             -- Cheap: the button does not build the canvas frame, so the
             -- 4096-texture hitch still waits for a real click.
-            WP.UI:EnsureMinimapButton()
+            PP.UI:EnsureMinimapButton()
         end
     elseif event == "PLAYER_ENTERING_WORLD" then
         local isLogin, isReload = ...
@@ -190,13 +190,13 @@ events:SetScript("OnEvent", function(_, event, ...)
             -- Give the world (and guild roster) a moment to settle before
             -- asking peers for current canvases.
             C_Timer.After(8, function()
-                WP.Comm:HelloAll(true)
+                PP.Comm:HelloAll(true)
             end)
         end
     elseif event == "CHAT_MSG_ADDON" then
-        WP.Comm:OnMessage(...)
+        PP.Comm:OnMessage(...)
     elseif event == "BN_CHAT_MSG_ADDON" then
-        WP.Comm:OnBNetMessage(...)
+        PP.Comm:OnBNetMessage(...)
     end
 end)
 
@@ -210,16 +210,16 @@ local function DescribePortrait(p)
     if p.locked then
         bits[#bits + 1] = "|cffffcc00[locked]|r"
     end
-    if WP.db.activeId == p.id then
+    if PP.db.activeId == p.id then
         bits[#bits + 1] = "|cff7ec0ee<- active|r"
     end
     return table.concat(bits, " ")
 end
 
-SLASH_WOWPAINT1 = "/wowpaint"
-SLASH_WOWPAINT2 = "/wpaint"
-SlashCmdList["WOWPAINT"] = function(input)
-    if not WP.db then
+SLASH_PIXELPARTY1 = "/pixelparty"
+SLASH_PIXELPARTY2 = "/pparty"
+SlashCmdList["PIXELPARTY"] = function(input)
+    if not PP.db then
         return
     end
     input = (input or ""):gsub("^%s+", ""):gsub("%s+$", "")
@@ -228,116 +228,116 @@ SlashCmdList["WOWPAINT"] = function(input)
     local active = Portraits.Active()
 
     if cmd == "" or cmd == "show" or cmd == "toggle" then
-        WP.UI:Toggle()
+        PP.UI:Toggle()
     elseif cmd == "new" then
-        WP.UI:EnsureFrame()
+        PP.UI:EnsureFrame()
         if rest ~= "" then
-            WP.UI:CreatePortrait(rest)
+            PP.UI:CreatePortrait(rest)
         else
-            StaticPopup_Show("WOWPAINT_NEW")
+            StaticPopup_Show("PIXELPARTY_NEW")
         end
     elseif cmd == "invite" then
-        WP.UI:EnsureFrame()
+        PP.UI:EnsureFrame()
         if rest ~= "" then
-            WP.UI:SendInvite(rest)
+            PP.UI:SendInvite(rest)
         else
-            WP.UI:OnInviteClick()
+            PP.UI:OnInviteClick()
         end
     elseif cmd == "open" then
         local p = Portraits.FindByName(rest)
         if p then
             Portraits.SetActive(p.id)
-            WP.UI:UpdateAll()
-            WP.Print("Now painting '" .. p.name .. "'.")
+            PP.UI:UpdateAll()
+            PP.Print("Now painting '" .. p.name .. "'.")
         else
-            WP.Print("No portrait named '" .. rest .. "'. /wowpaint list shows them.")
+            PP.Print("No portrait named '" .. rest .. "'. /pixelparty list shows them.")
         end
     elseif cmd == "list" then
-        WP.Print("Portraits:")
+        PP.Print("Portraits:")
         for _, p in ipairs(Portraits.List()) do
-            WP.Print("  " .. DescribePortrait(p))
+            PP.Print("  " .. DescribePortrait(p))
         end
-        WP.Print(("Gallery: %d saved. /wowpaint gallery to browse."):format(#WP.db.gallery))
+        PP.Print(("Gallery: %d saved. /pixelparty gallery to browse."):format(#PP.db.gallery))
     elseif cmd == "delete" then
         local p = Portraits.FindByName(rest)
         if not p then
-            WP.Print("No portrait named '" .. rest .. "'.")
+            PP.Print("No portrait named '" .. rest .. "'.")
         elseif p.id == Portraits.SHARED_ID then
-            WP.Print("The Shared canvas cannot be removed.")
+            PP.Print("The Shared canvas cannot be removed.")
         else
-            WP.UI:EnsureFrame()
-            StaticPopup_Show("WOWPAINT_DELETE_PORTRAIT", p.name, nil, { id = p.id })
+            PP.UI:EnsureFrame()
+            StaticPopup_Show("PIXELPARTY_DELETE_PORTRAIT", p.name, nil, { id = p.id })
         end
     elseif cmd == "uninvite" or cmd == "kick" then
-        WP.UI:EnsureFrame()
+        PP.UI:EnsureFrame()
         if rest ~= "" then
-            WP.UI:Uninvite(rest)
+            PP.UI:Uninvite(rest)
         else
-            WP.UI:ToggleMembers()
+            PP.UI:ToggleMembers()
         end
     elseif cmd == "lock" or cmd == "unlock" then
-        WP.UI:EnsureFrame()
-        -- Explicit verbs, not a toggle: "/wowpaint lock" on a locked
+        PP.UI:EnsureFrame()
+        -- Explicit verbs, not a toggle: "/pixelparty lock" on a locked
         -- portrait must not unlock it.
-        WP.UI:OnLockClick(cmd == "lock")
+        PP.UI:OnLockClick(cmd == "lock")
     elseif cmd == "members" then
-        WP.UI:EnsureFrame()
-        WP.UI.frame:Show()
-        WP.UI:ToggleMembers()
+        PP.UI:EnsureFrame()
+        PP.UI.frame:Show()
+        PP.UI:ToggleMembers()
     elseif cmd == "portraits" then
-        WP.UI:EnsureFrame()
-        WP.UI:TogglePicker()
+        PP.UI:EnsureFrame()
+        PP.UI:TogglePicker()
     elseif cmd == "minimap" then
-        WP.UI:ToggleMinimapButton()
+        PP.UI:ToggleMinimapButton()
     elseif cmd == "save" then
-        WP.UI:EnsureFrame()
+        PP.UI:EnsureFrame()
         if rest ~= "" then
-            WP.UI:SaveToGallery(rest)
+            PP.UI:SaveToGallery(rest)
         else
-            StaticPopup_Show("WOWPAINT_SAVE")
+            StaticPopup_Show("PIXELPARTY_SAVE")
         end
     elseif cmd == "gallery" then
-        WP.UI:EnsureFrame()
-        if not WP.UI.frame:IsShown() then
-            WP.UI.frame:Show()
+        PP.UI:EnsureFrame()
+        if not PP.UI.frame:IsShown() then
+            PP.UI.frame:Show()
         end
-        WP.UI:ToggleGallery()
+        PP.UI:ToggleGallery()
     elseif cmd == "sync" then
-        if WP.Comm:SendHello(active, true) then
-            WP.Print("Requested sync for '" .. active.name .. "'.")
+        if PP.Comm:SendHello(active, true) then
+            PP.Print("Requested sync for '" .. active.name .. "'.")
         else
-            WP.Print("No one to sync with - check your scope or the portrait's members.")
+            PP.Print("No one to sync with - check your scope or the portrait's members.")
         end
     elseif cmd == "clear" then
         if active.locked then
-            WP.Print("'" .. active.name .. "' is locked.")
+            PP.Print("'" .. active.name .. "' is locked.")
         else
-            WP.UI:EnsureFrame()
-            StaticPopup_Show("WOWPAINT_CLEAR", active.name)
+            PP.UI:EnsureFrame()
+            StaticPopup_Show("PIXELPARTY_CLEAR", active.name)
         end
     elseif cmd == "channel" then
         local shared = Portraits.Get(Portraits.SHARED_ID)
         local mode = rest:upper()
         if VALID_SCOPES[mode] then
             shared.dist = mode
-            WP.UI:UpdateAll()
-            WP.Print("Shared canvas scope set to " .. mode:lower() .. ".")
+            PP.UI:UpdateAll()
+            PP.Print("Shared canvas scope set to " .. mode:lower() .. ".")
         else
-            WP.Print(("Shared scope is %s. Usage: /wowpaint channel auto | guild | party | raid"):format(
+            PP.Print(("Shared scope is %s. Usage: /pixelparty channel auto | guild | party | raid"):format(
                 (shared.dist or "AUTO"):lower()))
         end
     else
-        WP.Print("Commands:")
-        WP.Print("  /wowpaint - toggle the canvas")
-        WP.Print("  /wowpaint new [name] - create a portrait you can invite people to")
-        WP.Print("  /wowpaint invite [player] - invite someone to the active portrait")
-        WP.Print("  /wowpaint open <name> | list | delete <name> - manage portraits")
-        WP.Print("  /wowpaint portraits | members - open the picker / roster panels")
-        WP.Print("  /wowpaint minimap - show or hide the minimap button")
-        WP.Print("  /wowpaint uninvite [player] - remove a member (creator only)")
-        WP.Print("  /wowpaint lock | unlock - freeze the active portrait (creator only)")
-        WP.Print("  /wowpaint save [name] | gallery - snapshot to / browse your gallery")
-        WP.Print("  /wowpaint channel auto|guild|party|raid - Shared canvas scope")
-        WP.Print("  /wowpaint sync | clear - re-sync / wipe the active portrait")
+        PP.Print("Commands:")
+        PP.Print("  /pixelparty - toggle the canvas")
+        PP.Print("  /pixelparty new [name] - create a portrait you can invite people to")
+        PP.Print("  /pixelparty invite [player] - invite someone to the active portrait")
+        PP.Print("  /pixelparty open <name> | list | delete <name> - manage portraits")
+        PP.Print("  /pixelparty portraits | members - open the picker / roster panels")
+        PP.Print("  /pixelparty minimap - show or hide the minimap button")
+        PP.Print("  /pixelparty uninvite [player] - remove a member (creator only)")
+        PP.Print("  /pixelparty lock | unlock - freeze the active portrait (creator only)")
+        PP.Print("  /pixelparty save [name] | gallery - snapshot to / browse your gallery")
+        PP.Print("  /pixelparty channel auto|guild|party|raid - Shared canvas scope")
+        PP.Print("  /pixelparty sync | clear - re-sync / wipe the active portrait")
     end
 end

@@ -1,7 +1,7 @@
--- Desktop-only test harness for WoWPaint's pure logic (never loaded by the
+-- Desktop-only test harness for Pixel Party's pure logic (never loaded by the
 -- game client). Run from the repo root:  lua tests/run_tests.lua
 
-local WP = {}
+local PP = {}
 
 -- Minimal WoW-global stubs so pure-logic modules load on desktop Lua.
 time = time or os.time
@@ -14,7 +14,7 @@ local function loadModule(file)
     for _, p in ipairs(paths) do
         local chunk = loadfile(p)
         if chunk then
-            chunk("WoWPaint", WP)
+            chunk("PixelParty", PP)
             return
         end
     end
@@ -25,10 +25,10 @@ loadModule("Util.lua")
 loadModule("Canvas.lua")
 loadModule("Portraits.lua")
 
-local Canvas = WP.Canvas
-local Portraits = WP.Portraits
-WP.db = { portraits = {}, gallery = {}, activeId = Portraits.SHARED_ID }
-WP.Comm = { FlushPaintOps = function() end } -- SetActive flushes via Comm
+local Canvas = PP.Canvas
+local Portraits = PP.Portraits
+PP.db = { portraits = {}, gallery = {}, activeId = Portraits.SHARED_ID }
+PP.Comm = { FlushPaintOps = function() end } -- SetActive flushes via Comm
 
 local failures = 0
 
@@ -41,25 +41,27 @@ local function check(cond, label)
     end
 end
 
+check(PP.VERSION == "0.6.0", "runtime version matches the breaking Pixel Party release")
+
 -- Char codec ---------------------------------------------------------------
 
 local ok = true
 for n = 0, 63 do
-    local c = WP.EncodeChar(n)
-    if type(c) ~= "string" or #c ~= 1 or WP.DecodeChar(c) ~= n then
+    local c = PP.EncodeChar(n)
+    if type(c) ~= "string" or #c ~= 1 or PP.DecodeChar(c) ~= n then
         ok = false
     end
 end
 check(ok, "EncodeChar/DecodeChar round-trips 0..63")
-check(WP.EncodeChar(64) == nil and WP.EncodeChar(-1) == nil, "EncodeChar rejects out-of-range")
-check(WP.DecodeChar("|") == nil and WP.DecodeChar(":") == nil and WP.DecodeChar("") == nil,
+check(PP.EncodeChar(64) == nil and PP.EncodeChar(-1) == nil, "EncodeChar rejects out-of-range")
+check(PP.DecodeChar("|") == nil and PP.DecodeChar(":") == nil and PP.DecodeChar("") == nil,
     "DecodeChar rejects unknown characters")
 
 -- Alphabet must avoid characters the chat layer treats specially, and the
 -- protocol's own delimiter.
 local unsafe = false
 for n = 0, 63 do
-    local c = WP.EncodeChar(n)
+    local c = PP.EncodeChar(n)
     if c == "|" or c == ":" or c:byte() < 33 or c:byte() > 126 then
         unsafe = true
     end
@@ -139,7 +141,7 @@ check(Canvas.ValidSize(64) and Canvas.ValidSize(128) and not Canvas.ValidSize(96
 
 local function walkLine(x0, y0, x1, y1)
     local pts = {}
-    WP.ForLine(x0, y0, x1, y1, function(x, y)
+    PP.ForLine(x0, y0, x1, y1, function(x, y)
         pts[#pts + 1] = { x, y }
     end)
     return pts
@@ -167,13 +169,13 @@ check(ok, "ForLine is contiguous with correct endpoints on a diagonal")
 
 -- Paint op codec -------------------------------------------------------------
 
-check(WP.OpWidth(64) == 3 and WP.OpWidth(128) == 5, "op width follows the canvas size")
+check(PP.OpWidth(64) == 3 and PP.OpWidth(128) == 5, "op width follows the canvas size")
 
 -- The 64 encoding must stay byte-for-byte what earlier versions emit, or the
 -- Shared canvas stops being readable across versions.
-check(WP.EncodeOp(64, 1, 1, 0) == WP.EncodeChar(0) .. WP.EncodeChar(0) .. WP.EncodeChar(0),
+check(PP.EncodeOp(64, 1, 1, 0) == PP.EncodeChar(0) .. PP.EncodeChar(0) .. PP.EncodeChar(0),
     "the 3-char encoding is unchanged")
-check(#WP.EncodeOp(64, 64, 64, 15) == 3 and #WP.EncodeOp(128, 1, 1, 0) == 5,
+check(#PP.EncodeOp(64, 64, 64, 15) == 3 and #PP.EncodeOp(128, 1, 1, 0) == 5,
     "ops are 3 chars at size 64 and 5 above it")
 
 ok = true
@@ -182,7 +184,7 @@ for _, size in ipairs(Canvas.SIZES) do
         { 65, 100, 9 }, { 33, 17, 5 } }) do
         local x, y, c = pt[1], pt[2], pt[3]
         if x <= size and y <= size then
-            local dx, dy, dc = WP.DecodeOp(size, WP.EncodeOp(size, x, y, c), 1)
+            local dx, dy, dc = PP.DecodeOp(size, PP.EncodeOp(size, x, y, c), 1)
             if dx ~= x or dy ~= y or dc ~= c then
                 ok = false
             end
@@ -191,8 +193,8 @@ for _, size in ipairs(Canvas.SIZES) do
 end
 check(ok, "every op round-trips at both widths, including past 64")
 
-check(WP.DecodeOp(128, "aa", 1) == nil, "DecodeOp rejects a truncated wide op")
-check(WP.DecodeOp(64, "a|a", 1) == nil, "DecodeOp rejects characters off the alphabet")
+check(PP.DecodeOp(128, "aa", 1) == nil, "DecodeOp rejects a truncated wide op")
+check(PP.DecodeOp(64, "a|a", 1) == nil, "DecodeOp rejects characters off the alphabet")
 
 -- A batch must stay inside the 255-byte payload with the kind byte and id.
 check(1 + 6 + 76 * 3 <= 240 and 1 + 6 + 48 * 5 <= 247,
@@ -214,40 +216,40 @@ check(tonumber(si) == 3 and tonumber(sn) == 41 and tonumber(srev) == 1234 and sf
 
 -- Viewport mapping -----------------------------------------------------------
 
-check(WP.VisibleCells(64, 8, 512) == 64, "a 64 canvas fills the viewport at 8px")
-check(WP.VisibleCells(64, 16, 512) == 32, "zooming to 16px halves what is visible")
-check(WP.VisibleCells(64, 4, 512) == 64, "visible cells never exceed the canvas")
-check(WP.VisibleCells(128, 4, 512) == 128, "a 128 canvas fits at 4px")
-check(WP.VisibleCells(128, 8, 512) == 64, "a 128 canvas shows half its width at 8px")
+check(PP.VisibleCells(64, 8, 512) == 64, "a 64 canvas fills the viewport at 8px")
+check(PP.VisibleCells(64, 16, 512) == 32, "zooming to 16px halves what is visible")
+check(PP.VisibleCells(64, 4, 512) == 64, "visible cells never exceed the canvas")
+check(PP.VisibleCells(128, 4, 512) == 128, "a 128 canvas fits at 4px")
+check(PP.VisibleCells(128, 8, 512) == 64, "a 128 canvas shows half its width at 8px")
 
-check(WP.FitZoom(64, 512) == 8, "64 fits the viewport exactly at 8px")
-check(WP.FitZoom(128, 512) == 4, "128 needs 4px to fit")
-check(WP.FitZoom(256, 512) == 4, "beyond the zoom range, fit falls back to the smallest zoom")
+check(PP.FitZoom(64, 512) == 8, "64 fits the viewport exactly at 8px")
+check(PP.FitZoom(128, 512) == 4, "128 needs 4px to fit")
+check(PP.FitZoom(256, 512) == 4, "beyond the zoom range, fit falls back to the smallest zoom")
 
-local zooms = WP.ZoomList(64, 512)
+local zooms = PP.ZoomList(64, 512)
 check(#zooms == 3 and zooms[1] == 8 and zooms[3] == 32,
     "a 64 canvas offers 8/16/32 and never a wasteful zoom-out")
-check(#WP.ZoomList(128, 512) == 4, "a 128 canvas also offers the 4px fit level")
+check(#PP.ZoomList(128, 512) == 4, "a 128 canvas also offers the 4px fit level")
 
-check(WP.ClampPan(64, 64, 5) == 1, "pan is pinned when the whole canvas is visible")
-check(WP.ClampPan(64, 32, 1) == 1, "pan cannot go above the first cell")
-check(WP.ClampPan(64, 32, 99) == 33, "pan stops with the last cell flush to the edge")
-check(WP.ClampPan(64, 32, 20) == 20, "pan passes through inside its range")
+check(PP.ClampPan(64, 64, 5) == 1, "pan is pinned when the whole canvas is visible")
+check(PP.ClampPan(64, 32, 1) == 1, "pan cannot go above the first cell")
+check(PP.ClampPan(64, 32, 99) == 33, "pan stops with the last cell flush to the edge")
+check(PP.ClampPan(64, 32, 20) == 20, "pan passes through inside its range")
 
-local vx, vy = WP.ViewToCanvas(33, 17, 1, 1)
+local vx, vy = PP.ViewToCanvas(33, 17, 1, 1)
 check(vx == 33 and vy == 17, "the first slot shows the panned-to cell")
-vx, vy = WP.ViewToCanvas(33, 17, 32, 32)
+vx, vy = PP.ViewToCanvas(33, 17, 32, 32)
 check(vx == 64 and vy == 48, "the last slot shows the far corner of the window")
 
-local cc, cr = WP.CanvasToView(33, 17, 32, 33, 17)
+local cc, cr = PP.CanvasToView(33, 17, 32, 33, 17)
 check(cc == 1 and cr == 1, "CanvasToView inverts ViewToCanvas")
-check(WP.CanvasToView(33, 17, 32, 32, 17) == nil, "cells left of the window are not visible")
-check(WP.CanvasToView(33, 17, 32, 65, 17) == nil, "cells right of the window are not visible")
+check(PP.CanvasToView(33, 17, 32, 32, 17) == nil, "cells left of the window are not visible")
+check(PP.CanvasToView(33, 17, 32, 65, 17) == nil, "cells right of the window are not visible")
 ok = true
 for x = 33, 64 do
     for y = 17, 48 do
-        local c, r = WP.CanvasToView(33, 17, 32, x, y)
-        if not c or WP.ViewToCanvas(33, 17, c, r) ~= x then
+        local c, r = PP.CanvasToView(33, 17, 32, x, y)
+        if not c or PP.ViewToCanvas(33, 17, c, r) ~= x then
             ok = false
         end
     end
@@ -256,7 +258,7 @@ check(ok, "every cell in the window round-trips through both mappings")
 
 -- Wire-format size assumptions ---------------------------------------------
 
-local op = WP.EncodeChar(63) .. WP.EncodeChar(63) .. WP.EncodeChar(15)
+local op = PP.EncodeChar(63) .. PP.EncodeChar(63) .. PP.EncodeChar(15)
 check(#op == 3, "one paint op is exactly 3 chars")
 check(1 + 6 + 76 * 3 <= 240, "max batch message (kind + id + ops) stays under 240 chars")
 
@@ -282,9 +284,9 @@ check(#Portraits.SanitizeName(string.rep("x", 60)) == Portraits.MAX_NAME, "Sanit
 
 -- Name normalization ---------------------------------------------------------
 
-check(WP.NormalizeName("Bob") == "Bob-Testrealm", "NormalizeName appends our realm to bare names")
-check(WP.NormalizeName("Bob-Other") == "Bob-Other", "NormalizeName keeps existing realm")
-check(WP.NormalizeName("") == nil and WP.NormalizeName(nil) == nil, "NormalizeName rejects empty input")
+check(PP.NormalizeName("Bob") == "Bob-Testrealm", "NormalizeName appends our realm to bare names")
+check(PP.NormalizeName("Bob-Other") == "Bob-Other", "NormalizeName keeps existing realm")
+check(PP.NormalizeName("") == nil and PP.NormalizeName(nil) == nil, "NormalizeName rejects empty input")
 
 -- Roster union-merge ---------------------------------------------------------
 
@@ -353,15 +355,15 @@ local function collect(fn)
     return pts, seen
 end
 
-pts = collect(function(add) WP.ForRect(4, 4, 8, 7, false, add) end)
+pts = collect(function(add) PP.ForRect(4, 4, 8, 7, false, add) end)
 check(#pts == 2 * 5 + 2 * 4 - 4 and not pts.dup, "ForRect outlines a 5x4 box without repeats")
-pts = collect(function(add) WP.ForRect(8, 7, 4, 4, true, add) end)
+pts = collect(function(add) PP.ForRect(8, 7, 4, 4, true, add) end)
 check(#pts == 20, "ForRect fills from reversed corners too")
-pts = collect(function(add) WP.ForRect(3, 3, 3, 3, false, add) end)
+pts = collect(function(add) PP.ForRect(3, 3, 3, 3, false, add) end)
 check(#pts == 1, "ForRect degenerates to a single cell")
 
-local outlinePts, outline = collect(function(add) WP.ForEllipse(10, 10, 20, 16, false, add) end)
-local filledPts, filled = collect(function(add) WP.ForEllipse(10, 10, 20, 16, true, add) end)
+local outlinePts, outline = collect(function(add) PP.ForEllipse(10, 10, 20, 16, false, add) end)
+local filledPts, filled = collect(function(add) PP.ForEllipse(10, 10, 20, 16, true, add) end)
 check(#filledPts > #outlinePts and not filledPts.dup and not outlinePts.dup,
     "ForEllipse fills more than it outlines, neither with repeats")
 
@@ -396,7 +398,7 @@ for x, c in pairs(cols) do
     end
 end
 check(ok, "ForEllipse outline closes on every row and column")
-pts = collect(function(add) WP.ForEllipse(5, 5, 5, 5, false, add) end)
+pts = collect(function(add) PP.ForEllipse(5, 5, 5, 5, false, add) end)
 check(#pts == 1, "ForEllipse degenerates to a single cell")
 
 -- Flood fill -----------------------------------------------------------------
@@ -469,16 +471,86 @@ Ambiguate = function(name) return (name:gsub("%-.*", "")) end
 IsInGuild = function() return false end
 IsInGroup = function() return false end
 IsInRaid = function() return false end
-C_ChatInfo = { RegisterAddonMessagePrefix = function() end, SendAddonMessage = function() end }
+local registeredPrefix
+C_ChatInfo = {
+    RegisterAddonMessagePrefix = function(prefix)
+        registeredPrefix = prefix
+        return true
+    end,
+    SendAddonMessage = function() end,
+}
 C_Timer = { NewTicker = function() end, After = function() end }
 
 local noop = function() end
-WP.Print = noop
-WP.UI = setmetatable({}, { __index = function() return noop end })
-WP.playerFullName = "Me-Testrealm"
+PP.Print = noop
+PP.UI = setmetatable({}, { __index = function() return noop end })
+PP.playerFullName = "Me-Testrealm"
+
+-- StaticPopup dialogs on the modern client ---------------------------------
+--
+-- 1.15.7+ clients ship the retail dialog rework: the edit box hangs off the
+-- dialog as .EditBox behind a :GetEditBox() accessor, and the old lowercase
+-- .editBox field is gone. Every edit-box dialog must reach the text through
+-- the accessor or its Accept button dies with a nil index error. UI.lua's
+-- popup handlers are plain functions, so a mock dialog drives them here.
+
+StaticPopupDialogs = {}
+ACCEPT, CANCEL, YES, NO, DECLINE = "Accept", "Cancel", "Yes", "No", "Decline"
+loadModule("UI.lua")
+
+local function modernDialog(text)
+    local dialog = {}
+    dialog.EditBox = {
+        text = text,
+        GetText = function(self) return self.text end,
+        SetText = function(self, t) self.text = t end,
+        HighlightText = function() end,
+        GetParent = function() return dialog end,
+    }
+    function dialog:GetEditBox() return self.EditBox end
+    function dialog:Hide() end
+    return dialog
+end
+
+local act = Portraits.Create("Live", "MEMBERS", nil, "Me-Testrealm")
+PP.db.portraits[act.id] = act
+Portraits.SetActive(act.id)
+
+local saveDef = StaticPopupDialogs["PIXELPARTY_SAVE"]
+local dlg = modernDialog("")
+check(pcall(saveDef.OnShow, dlg) and dlg.EditBox.text == "Live",
+    "the save dialog prefills the portrait name through GetEditBox()")
+dlg.EditBox.text = "Kept Name"
+local galleryBefore = #PP.db.gallery
+check(pcall(saveDef.OnAccept, dlg) and #PP.db.gallery == galleryBefore + 1
+    and PP.db.gallery[#PP.db.gallery].name == "Kept Name",
+    "the save dialog's Accept button saves under the typed name")
+
+check(pcall(StaticPopupDialogs["PIXELPARTY_NEW"].OnAccept, modernDialog("Fresh"))
+    and Portraits.FindByName("Fresh") ~= nil,
+    "the new-portrait dialog's Accept button creates the named portrait")
+
+local invited
+PP.Comm.SendInvite = function(_, _, name)
+    invited = name
+    return true
+end
+local inviteDef = StaticPopupDialogs["PIXELPARTY_INVITE_SEND"]
+dlg = modernDialog("")
+check(pcall(inviteDef.OnShow, dlg, { prefill = "Pal-Testrealm" })
+    and dlg.EditBox.text == "Pal-Testrealm",
+    "the invite dialog prefills the target through GetEditBox()")
+check(pcall(inviteDef.OnAccept, dlg) and invited == "Pal-Testrealm",
+    "the invite dialog's Accept button sends to the typed name")
+PP.Comm.SendInvite = nil
+PP.db.activeId = Portraits.SHARED_ID
+-- Loading UI.lua replaced the noop UI stub; the Comm tests below drive real
+-- messages and only want inert UI callbacks, so put the stub back.
+PP.UI = setmetatable({}, { __index = function() return noop end })
 
 loadModule("Comm.lua")
-local Comm = WP.Comm
+local Comm = PP.Comm
+check(Comm.PREFIX == "PixelParty", "the wire protocol uses the PixelParty prefix")
 
 local OWNER, OTHER = "Owner-Testrealm", "Other-Testrealm"
 
@@ -499,33 +571,33 @@ end
 
 -- Roster tombstones are honoured from the owner and from nobody else.
 local wire = newShared("aaaaaa", OWNER, { OWNER, OTHER, "Ann-Testrealm" })
-Comm:OnMessage("WoWPaint", "Maaaaaa:-Ann-Testrealm", "WHISPER", OTHER)
+Comm:OnMessage("PixelParty", "Maaaaaa:-Ann-Testrealm", "WHISPER", OTHER)
 check(Portraits.IsMember(wire, "Ann-Testrealm"),
     "a plain member cannot uninvite anyone through roster gossip")
-Comm:OnMessage("WoWPaint", "Maaaaaa:-Ann-Testrealm", "WHISPER", OWNER)
+Comm:OnMessage("PixelParty", "Maaaaaa:-Ann-Testrealm", "WHISPER", OWNER)
 check(not Portraits.IsMember(wire, "Ann-Testrealm") and Portraits.IsRemoved(wire, "Ann-Testrealm"),
     "the owner's roster tombstone removes the member")
-Comm:OnMessage("WoWPaint", "Maaaaaa:Ann-Testrealm", "WHISPER", OTHER)
+Comm:OnMessage("PixelParty", "Maaaaaa:Ann-Testrealm", "WHISPER", OTHER)
 check(not Portraits.IsMember(wire, "Ann-Testrealm"),
     "a stale peer's roster cannot resurrect the uninvited member")
-Comm:OnMessage("WoWPaint", "Maaaaaa:+Ann-Testrealm", "WHISPER", OWNER)
+Comm:OnMessage("PixelParty", "Maaaaaa:+Ann-Testrealm", "WHISPER", OWNER)
 check(Portraits.IsMember(wire, "Ann-Testrealm"), "the owner can lift a tombstone and re-add")
 
 -- Locking is the owner's in both directions.
-Comm:OnMessage("WoWPaint", "Laaaaaa", "WHISPER", OTHER)
+Comm:OnMessage("PixelParty", "Laaaaaa", "WHISPER", OTHER)
 check(not wire.locked, "a plain member cannot lock the portrait")
-Comm:OnMessage("WoWPaint", "Laaaaaa", "WHISPER", OWNER)
+Comm:OnMessage("PixelParty", "Laaaaaa", "WHISPER", OWNER)
 check(wire.locked, "the owner can lock the portrait")
-Comm:OnMessage("WoWPaint", "Uaaaaaa", "WHISPER", OTHER)
+Comm:OnMessage("PixelParty", "Uaaaaaa", "WHISPER", OTHER)
 check(wire.locked, "a plain member cannot unlock the portrait")
-Comm:OnMessage("WoWPaint", "Uaaaaaa", "WHISPER", OWNER)
+Comm:OnMessage("PixelParty", "Uaaaaaa", "WHISPER", OWNER)
 check(not wire.locked, "the owner can unlock the portrait")
 
 -- Locked canvases drop inbound paint, and only the owner answers with a nag.
 wire.locked = true
 local before = wire.cells[Canvas.Index(wire.size, 1, 1)]
 Comm.queue = {}
-Comm:OnMessage("WoWPaint", "Baaaaaa" .. WP.EncodeChar(0) .. WP.EncodeChar(0) .. WP.EncodeChar(5),
+Comm:OnMessage("PixelParty", "Baaaaaa" .. PP.EncodeChar(0) .. PP.EncodeChar(0) .. PP.EncodeChar(5),
     "WHISPER", OTHER)
 check(wire.cells[Canvas.Index(wire.size, 1, 1)] == before, "paint on a locked portrait is dropped")
 check(sent("Laaaaaa") == nil, "a non-owner does not nag stale painters (its L is ignored anyway)")
@@ -533,9 +605,9 @@ wire.locked = false
 
 -- Being uninvited drops the local copy, but only when the owner says so.
 local victim = newShared("bbbbbb", OWNER, { OWNER, "Me-Testrealm" })
-Comm:OnMessage("WoWPaint", "Kbbbbbb", "WHISPER", OTHER)
+Comm:OnMessage("PixelParty", "Kbbbbbb", "WHISPER", OTHER)
 check(Portraits.Get("bbbbbb") ~= nil, "a stranger cannot uninvite us")
-Comm:OnMessage("WoWPaint", "Kbbbbbb", "WHISPER", OWNER)
+Comm:OnMessage("PixelParty", "Kbbbbbb", "WHISPER", OWNER)
 check(Portraits.Get("bbbbbb") == nil, "the owner's uninvite deletes our copy")
 
 -- The owner's own uninvite: notify first, then drop them from the roster.
@@ -562,9 +634,9 @@ local bnetPortrait = newShared("ffffff", OWNER, { OWNER, "Me-Testrealm" })
 bnetPortrait.rev = 3
 Comm.queue = {}
 -- A clear smuggled onto the unordered pipe must be ignored outright.
-Comm:OnBNetMessage("WoWPaint", "Cffffff", "WHISPER", 1234)
+Comm:OnBNetMessage("PixelParty", "Cffffff", "WHISPER", 1234)
 check(bnetPortrait.rev == 3, "a clear arriving over Battle.net is dropped")
-Comm:OnBNetMessage("WoWPaint", "Bffffff" .. WP.EncodeOp(64, 1, 1, 5), "WHISPER", 1234)
+Comm:OnBNetMessage("PixelParty", "Bffffff" .. PP.EncodeOp(64, 1, 1, 5), "WHISPER", 1234)
 check(bnetPortrait.cells[Canvas.Index(64, 1, 1)] == 0, "paint arriving over Battle.net is dropped")
 check(not Comm:BNetAccountFor(OWNER),
     "with no Battle.net API present, snapshots fall back to the chat transport")
@@ -574,7 +646,7 @@ check(not Comm:BNetAccountFor(OWNER),
 local rev = Portraits.Create("Rev", "MEMBERS", "eeeeee", "Me-Testrealm")
 Portraits.AddMembers(rev, { "Me-Testrealm", OWNER, OTHER })
 Comm.queue = {}
-local dup = WP.EncodeChar(0) .. WP.EncodeChar(0) .. WP.EncodeChar(5)
+local dup = PP.EncodeChar(0) .. PP.EncodeChar(0) .. PP.EncodeChar(5)
 rev.rev = 2
 Comm:Send(rev, "Beeeeee" .. dup, 101) -- two members => two queued copies each
 Comm:Send(rev, "Beeeeee" .. dup, 102)
@@ -607,17 +679,26 @@ end
 
 loadModule("Core.lua")
 check(type(eventHandler) == "function", "Core installs an event handler")
+check(SLASH_PIXELPARTY1 == "/pixelparty" and SLASH_PIXELPARTY2 == "/pparty",
+    "Pixel Party registers both supported slash commands")
+check(type(SlashCmdList["PIXELPARTY"]) == "function",
+    "Pixel Party installs its renamed slash-command handler")
+PixelPartyDB = nil
+eventHandler(nil, "ADDON_LOADED", "AnotherAddon")
+check(PixelPartyDB == nil and registeredPrefix == nil,
+    "an unrelated ADDON_LOADED event does not initialise Pixel Party")
 
 local function migrate(saved)
-    WoWPaintDB = saved
-    eventHandler(nil, "ADDON_LOADED", "WoWPaint")
-    return WP.db
+    PixelPartyDB = saved
+    eventHandler(nil, "ADDON_LOADED", "PixelParty")
+    return PP.db
 end
 
 -- A v1 database: one flat canvas, no portraits at all.
 local v1cells = Canvas.New(64)
 v1cells[Canvas.Index(64, 5, 5)] = 9
 local db = migrate({ dbVersion = 1, cells = v1cells, rev = 12, channel = "GUILD" })
+check(registeredPrefix == "PixelParty", "initialisation registers the PixelParty wire prefix")
 local shared = db.portraits[Portraits.SHARED_ID]
 check(db.dbVersion == 2, "the database is upgraded to v2")
 check(shared ~= nil and shared.rev == 12 and shared.dist == "GUILD",

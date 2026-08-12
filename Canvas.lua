@@ -1,7 +1,7 @@
-local ADDON_NAME, WP = ...
+local ADDON_NAME, PP = ...
 
 local Canvas = {}
-WP.Canvas = Canvas
+PP.Canvas = Canvas
 
 -- Canvases are square and come in a fixed set of sizes. 64 is the original
 -- and the only size the built-in Shared canvas ever takes, which is what
@@ -106,8 +106,8 @@ function Canvas.Serialize(size, cells)
         while run < 64 and i + run <= n and cells[i + run] == c do
             run = run + 1
         end
-        out[#out + 1] = WP.EncodeChar(run - 1)
-        out[#out + 1] = WP.EncodeChar(c)
+        out[#out + 1] = PP.EncodeChar(run - 1)
+        out[#out + 1] = PP.EncodeChar(c)
         i = i + run
     end
     return table.concat(out)
@@ -125,8 +125,8 @@ function Canvas.Deserialize(size, data)
     local cells = {}
     local pos = 0
     for i = 1, #data, 2 do
-        local run = WP.DecodeChar(data:sub(i, i))
-        local color = WP.DecodeChar(data:sub(i + 1, i + 1))
+        local run = PP.DecodeChar(data:sub(i, i))
+        local color = PP.DecodeChar(data:sub(i + 1, i + 1))
         if not run or not color or color >= Canvas.NUM_COLORS then
             return nil
         end

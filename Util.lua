@@ -1,6 +1,6 @@
-local ADDON_NAME, WP = ...
+local ADDON_NAME, PP = ...
 
-WP.VERSION = "0.5.0"
+PP.VERSION = "0.6.0"
 
 -- 64-character alphabet used for compact wire encoding. Every character is
 -- safe inside an addon message payload (printable ASCII, no "|", no ":",
@@ -16,19 +16,19 @@ for i = 1, #ALPHABET do
 end
 
 -- Encode an integer 0..63 as a single character. Returns nil out of range.
-function WP.EncodeChar(n)
+function PP.EncodeChar(n)
     return VAL_TO_CHAR[n]
 end
 
 -- Decode a single character back to 0..63. Returns nil for unknown chars.
-function WP.DecodeChar(c)
+function PP.DecodeChar(c)
     return CHAR_TO_VAL[c]
 end
 
 -- Bresenham line walk from (x0, y0) to (x1, y1) inclusive, calling fn(x, y)
 -- for every cell. Used to fill the gaps a fast mouse drag leaves between
 -- consecutive OnUpdate samples.
-function WP.ForLine(x0, y0, x1, y1, fn)
+function PP.ForLine(x0, y0, x1, y1, fn)
     local dx = math.abs(x1 - x0)
     local dy = -math.abs(y1 - y0)
     local sx = x0 < x1 and 1 or -1
@@ -52,7 +52,7 @@ function WP.ForLine(x0, y0, x1, y1, fn)
 end
 
 -- Rectangle spanning two opposite corners, outline unless `filled`.
-function WP.ForRect(x0, y0, x1, y1, filled, fn)
+function PP.ForRect(x0, y0, x1, y1, filled, fn)
     local xa, xb = math.min(x0, x1), math.max(x0, x1)
     local ya, yb = math.min(y0, y1), math.max(y0, y1)
     for y = ya, yb do
@@ -69,7 +69,7 @@ end
 -- scanning it is free, and testing 4-neighbours for the outline gives a
 -- closed, 4-connected edge at every aspect ratio (midpoint variants leak at
 -- shallow slopes).
-function WP.ForEllipse(x0, y0, x1, y1, filled, fn)
+function PP.ForEllipse(x0, y0, x1, y1, filled, fn)
     local xa, xb = math.min(x0, x1), math.max(x0, x1)
     local ya, yb = math.min(y0, y1), math.max(y0, y1)
     local cx, cy = (xa + xb) / 2, (ya + yb) / 2
@@ -100,37 +100,37 @@ end
 -- lets the Shared canvas stay readable by every version of the addon.
 ----------------------------------------------------------------------
 
-function WP.OpWidth(size)
+function PP.OpWidth(size)
     return size <= 64 and 3 or 5
 end
 
-function WP.EncodeOp(size, x, y, color)
+function PP.EncodeOp(size, x, y, color)
     if size <= 64 then
-        return WP.EncodeChar(x - 1) .. WP.EncodeChar(y - 1) .. WP.EncodeChar(color)
+        return PP.EncodeChar(x - 1) .. PP.EncodeChar(y - 1) .. PP.EncodeChar(color)
     end
     local px, py = x - 1, y - 1
-    return WP.EncodeChar(math.floor(px / 64)) .. WP.EncodeChar(px % 64)
-        .. WP.EncodeChar(math.floor(py / 64)) .. WP.EncodeChar(py % 64)
-        .. WP.EncodeChar(color)
+    return PP.EncodeChar(math.floor(px / 64)) .. PP.EncodeChar(px % 64)
+        .. PP.EncodeChar(math.floor(py / 64)) .. PP.EncodeChar(py % 64)
+        .. PP.EncodeChar(color)
 end
 
 -- Decode the op starting at position i. Returns 1-based x, y and the colour,
 -- or nil for anything malformed. Input is untrusted.
-function WP.DecodeOp(size, ops, i)
+function PP.DecodeOp(size, ops, i)
     if size <= 64 then
-        local x = WP.DecodeChar(ops:sub(i, i))
-        local y = WP.DecodeChar(ops:sub(i + 1, i + 1))
-        local c = WP.DecodeChar(ops:sub(i + 2, i + 2))
+        local x = PP.DecodeChar(ops:sub(i, i))
+        local y = PP.DecodeChar(ops:sub(i + 1, i + 1))
+        local c = PP.DecodeChar(ops:sub(i + 2, i + 2))
         if not x or not y or not c then
             return nil
         end
         return x + 1, y + 1, c
     end
-    local xh = WP.DecodeChar(ops:sub(i, i))
-    local xl = WP.DecodeChar(ops:sub(i + 1, i + 1))
-    local yh = WP.DecodeChar(ops:sub(i + 2, i + 2))
-    local yl = WP.DecodeChar(ops:sub(i + 3, i + 3))
-    local c = WP.DecodeChar(ops:sub(i + 4, i + 4))
+    local xh = PP.DecodeChar(ops:sub(i, i))
+    local xl = PP.DecodeChar(ops:sub(i + 1, i + 1))
+    local yh = PP.DecodeChar(ops:sub(i + 2, i + 2))
+    local yl = PP.DecodeChar(ops:sub(i + 3, i + 3))
+    local c = PP.DecodeChar(ops:sub(i + 4, i + 4))
     if not xh or not xl or not yh or not yl or not c then
         return nil
     end
@@ -146,23 +146,23 @@ end
 -- covered by the desktop suite; the UI only feeds it numbers.
 ----------------------------------------------------------------------
 
-WP.ZOOMS = { 4, 8, 16, 32 } -- screen pixels per cell, ascending
-WP.VIEW_PX = 512            -- edge of the square canvas widget
+PP.ZOOMS = { 4, 8, 16, 32 } -- screen pixels per cell, ascending
+PP.VIEW_PX = 512            -- edge of the square canvas widget
 
 -- How many cells fit across the viewport at this zoom, never more than the
 -- canvas has.
-function WP.VisibleCells(size, zoom, viewPx)
-    local fit = math.floor((viewPx or WP.VIEW_PX) / zoom)
+function PP.VisibleCells(size, zoom, viewPx)
+    local fit = math.floor((viewPx or PP.VIEW_PX) / zoom)
     return math.min(size, math.max(1, fit))
 end
 
 -- The most zoomed-out level worth offering: the largest zoom at which the
 -- whole canvas still fits. Zooming out past that only shrinks the picture
 -- inside a fixed widget, so there is nothing to gain.
-function WP.FitZoom(size, viewPx)
-    viewPx = viewPx or WP.VIEW_PX
-    local best = WP.ZOOMS[1]
-    for _, z in ipairs(WP.ZOOMS) do
+function PP.FitZoom(size, viewPx)
+    viewPx = viewPx or PP.VIEW_PX
+    local best = PP.ZOOMS[1]
+    for _, z in ipairs(PP.ZOOMS) do
         if size * z <= viewPx then
             best = z
         end
@@ -171,10 +171,10 @@ function WP.FitZoom(size, viewPx)
 end
 
 -- Zoom levels offered for a canvas of this size: fit level and inwards.
-function WP.ZoomList(size, viewPx)
-    local fit = WP.FitZoom(size, viewPx)
+function PP.ZoomList(size, viewPx)
+    local fit = PP.FitZoom(size, viewPx)
     local list = {}
-    for _, z in ipairs(WP.ZOOMS) do
+    for _, z in ipairs(PP.ZOOMS) do
         if z >= fit then
             list[#list + 1] = z
         end
@@ -183,18 +183,18 @@ function WP.ZoomList(size, viewPx)
 end
 
 -- Keep the top-left visible cell inside the canvas.
-function WP.ClampPan(size, visible, pan)
+function PP.ClampPan(size, visible, pan)
     local maxPan = math.max(1, size - visible + 1)
     return math.min(math.max(1, math.floor(pan or 1)), maxPan)
 end
 
 -- Viewport slot (1-based col,row) -> canvas cell.
-function WP.ViewToCanvas(panX, panY, col, row)
+function PP.ViewToCanvas(panX, panY, col, row)
     return panX + col - 1, panY + row - 1
 end
 
 -- Canvas cell -> viewport slot, or nil when it is scrolled out of sight.
-function WP.CanvasToView(panX, panY, visible, x, y)
+function PP.CanvasToView(panX, panY, visible, x, y)
     local col, row = x - panX + 1, y - panY + 1
     if col < 1 or col > visible or row < 1 or row > visible then
         return nil
@@ -202,22 +202,22 @@ function WP.CanvasToView(panX, panY, visible, x, y)
     return col, row
 end
 
-function WP.PlayerFullName()
-    if not WP.playerFullName then
+function PP.PlayerFullName()
+    if not PP.playerFullName then
         local name, realm = UnitFullName("player")
         if not realm or realm == "" then
             realm = GetNormalizedRealmName and GetNormalizedRealmName() or nil
         end
         if name then
-            WP.playerFullName = realm and (name .. "-" .. realm) or name
+            PP.playerFullName = realm and (name .. "-" .. realm) or name
         end
     end
-    return WP.playerFullName
+    return PP.playerFullName
 end
 
 -- Names on the wire and in rosters are always Name-Realm. Senders and typed
 -- names may arrive bare (same realm); normalize by appending our own realm.
-function WP.NormalizeName(name)
+function PP.NormalizeName(name)
     if type(name) ~= "string" or name == "" then
         return nil
     end
@@ -230,7 +230,7 @@ end
 
 -- True if an addon message sender is this player. CHAT_MSG_ADDON senders may
 -- arrive with or without a realm suffix depending on realm configuration.
-function WP.IsSelf(sender)
+function PP.IsSelf(sender)
     if not sender or sender == "" then
         return false
     end
@@ -238,7 +238,7 @@ function WP.IsSelf(sender)
         return false
     end
     if sender:find("-", 1, true) then
-        local full = WP.PlayerFullName()
+        local full = PP.PlayerFullName()
         return full ~= nil and sender == full
     end
     return true
