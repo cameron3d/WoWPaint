@@ -1,6 +1,6 @@
 local ADDON_NAME, PP = ...
 
-PP.VERSION = "0.6.0"
+PP.VERSION = "0.6.1"
 
 -- 64-character alphabet used for compact wire encoding. Every character is
 -- safe inside an addon message payload (printable ASCII, no "|", no ":",

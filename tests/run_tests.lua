@@ -41,7 +41,7 @@ local function check(cond, label)
     end
 end
 
-check(PP.VERSION == "0.6.0", "runtime version matches the breaking Pixel Party release")
+check(PP.VERSION == "0.6.1", "runtime version matches the current release")
 
 -- Char codec ---------------------------------------------------------------
 
