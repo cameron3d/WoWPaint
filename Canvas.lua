@@ -9,14 +9,25 @@ PP.Canvas = Canvas
 Canvas.DEFAULT_SIZE = 64
 Canvas.SIZES = { 64, 128 }
 Canvas.MAX_SIZE = 128
-Canvas.NUM_COLORS = 16
+-- 64 colors: one alphabet character on the wire, in ops and snapshots alike.
+-- This is the ceiling — a 65th color would change the wire format.
+Canvas.NUM_COLORS = 64
+-- Indices below this are the classic 16 shown on the palette row; the rest
+-- are the color wheel's. Clients before 0.7 only accept colors below it.
+Canvas.EXTENDED_BASE = 16
+Canvas.WHEEL_HUES = 12   -- spokes, 30 degrees apart, red first
+Canvas.WHEEL_SHADES = 4  -- rings per spoke, pale to dark
 
 -- Size is the first argument of every function here, and it is required.
 -- A call site that forgets it raises rather than quietly treating a 128
 -- canvas as a 64 one, which would corrupt coordinates instead of erroring.
 
--- Classic r/place (2017) palette. Index 0 is the background and doubles as
--- the eraser color.
+-- Palette indices are wire format and SavedVariables format: once a version
+-- ships, the color an index names must never change, only new indices may
+-- be added (and 64 is full).
+--
+-- 0-15: classic r/place (2017) palette. Index 0 is the background and
+-- doubles as the eraser color.
 Canvas.PALETTE = {
     [0]  = { 1.000, 1.000, 1.000 }, -- white
     [1]  = { 0.894, 0.894, 0.894 }, -- light gray
@@ -35,6 +46,63 @@ Canvas.PALETTE = {
     [14] = { 0.812, 0.431, 0.894 }, -- magenta
     [15] = { 0.510, 0.000, 0.502 }, -- purple
 }
+
+-- Standard HSV -> RGB. h in degrees (any value, wrapped), s and v in 0..1.
+function Canvas.HSVToRGB(h, s, v)
+    local c = v * s
+    local hp = (h % 360) / 60
+    local x = c * (1 - math.abs(hp % 2 - 1))
+    local r, g, b
+    if hp < 1 then
+        r, g, b = c, x, 0
+    elseif hp < 2 then
+        r, g, b = x, c, 0
+    elseif hp < 3 then
+        r, g, b = 0, c, x
+    elseif hp < 4 then
+        r, g, b = 0, x, c
+    elseif hp < 5 then
+        r, g, b = x, 0, c
+    else
+        r, g, b = c, 0, x
+    end
+    local m = v - c
+    return r + m, g + m, b + m
+end
+
+-- The wheel's shade rings, innermost first: pale, vivid, deep, dark.
+Canvas.WHEEL_SHADE_SV = {
+    { 0.38, 1.00 },
+    { 1.00, 1.00 },
+    { 1.00, 0.68 },
+    { 1.00, 0.40 },
+}
+
+-- 16-63: the color wheel, generated so the palette and the wheel layout can
+-- never disagree. Index = EXTENDED_BASE + hue * WHEEL_SHADES + shade, with
+-- hue 0-11 stepping 30 degrees from red and shade 0-3 pale to dark. The
+-- desktop suite pins spot values: changing the generator reshuffles published
+-- indices and breaks every existing canvas, so it must never happen.
+for hue = 0, Canvas.WHEEL_HUES - 1 do
+    for shade = 0, Canvas.WHEEL_SHADES - 1 do
+        local sv = Canvas.WHEEL_SHADE_SV[shade + 1]
+        local r, g, b = Canvas.HSVToRGB(hue * 30, sv[1], sv[2])
+        Canvas.PALETTE[Canvas.EXTENDED_BASE + hue * Canvas.WHEEL_SHADES + shade] = { r, g, b }
+    end
+end
+
+-- True if any cell uses a wheel color. Pre-0.7 clients cannot decode a
+-- snapshot of such a canvas; Comm uses this to warn rather than let them
+-- silently fail to sync.
+function Canvas.HasExtendedColors(size, cells)
+    for i = 1, Canvas.Cells(size) do
+        local v = cells[i]
+        if v and v >= Canvas.EXTENDED_BASE then
+            return true
+        end
+    end
+    return false
+end
 
 function Canvas.ValidSize(size)
     for _, s in ipairs(Canvas.SIZES) do

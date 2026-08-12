@@ -23,7 +23,14 @@ gallery entries, and UI settings stored by an earlier package are not imported.
 - `/pixelparty` (or `/pparty`) — toggle the canvas window.
 - **Left-click / drag** paints with the selected color; **right-click / drag** erases — with
   every tool, so right-dragging a box erases a box.
-- The palette row selects one of 16 colors (classic r/place palette).
+- The palette row selects one of 16 colors (classic r/place palette). The **wheel button** at
+  its end opens the **color wheel** — 48 more colors on 12 hue spokes × 4 shade rings, for 64
+  total. Everyone painting needs Pixel Party 0.7+ to see wheel colors: older versions never
+  receive those strokes (each cell keeps showing whatever was painted there before) and can't
+  sync a canvas that uses them. Pixel Party warns in chat when it knows that combination is
+  happening — best effort, since an out-of-date client that never announces itself can't be
+  detected — and prefers up-to-date painters when pulling a canvas, so a stale copy from an
+  old client doesn't quietly overwrite wheel-colored art.
 - **Clear** wipes the active canvas for everyone painting it (confirmation first).
 
 ### Tools
@@ -64,7 +71,8 @@ Party, Guild.
   **128×128**, four times the area. The Shared canvas is always 64×64.
 - Everyone painting a 128×128 portrait needs the same addon version — older clients can't read
   the wider coordinates. If someone's out of date you'll get a warning in chat rather than
-  silently mismatched art. The Shared canvas works across every version.
+  silently mismatched art. The Shared canvas works across every version as long as it sticks
+  to the classic 16 colors; wheel colors need 0.7+ everywhere, like everything else.
 - **Invite** (or `/pixelparty invite Thrall`) whispers an invitation — it prefills your current
   friendly target. The invitee gets an accept/decline popup; on accept they join the roster
   and receive the canvas automatically. Any member can invite others (up to 24 members).

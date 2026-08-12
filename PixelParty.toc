@@ -1,7 +1,7 @@
 ## Interface: 11509
 ## Title: Pixel Party
 ## Notes: Collaborative pixel painting: shared canvases, invite-only portraits, drawing tools, and a gallery.
-## Version: 0.6.1
+## Version: 0.7.0
 ## SavedVariables: PixelPartyDB
 ## IconTexture: Interface\AddOns\PixelParty\Media\PixelPartyMinimap.tga
 ## X-Category: Miscellaneous

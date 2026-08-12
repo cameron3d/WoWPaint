@@ -1,6 +1,21 @@
 local ADDON_NAME, PP = ...
 
-PP.VERSION = "0.6.1"
+PP.VERSION = "0.7.0"
+
+-- True when a peer's announced version string is at least major.minor.
+-- Absent or malformed versions read as older: peers that never say their
+-- version are the oldest of all.
+function PP.VersionAtLeast(v, major, minor)
+    if type(v) ~= "string" then
+        return false
+    end
+    local maj, min = v:match("^(%d+)%.(%d+)")
+    if not maj then
+        return false
+    end
+    maj, min = tonumber(maj), tonumber(min)
+    return maj > major or (maj == major and min >= minor)
+end
 
 -- 64-character alphabet used for compact wire encoding. Every character is
 -- safe inside an addon message payload (printable ASCII, no "|", no ":",

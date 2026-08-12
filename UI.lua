@@ -14,7 +14,9 @@ local FRAME_W = GRID + 28
 local FRAME_H = 682
 
 local SWATCH = 24
-local SWATCH_GAP = 8
+-- 6, not the original 8: the row carries the wheel button as a 17th slot
+-- and lands back on the same 504px it had with 16 swatches.
+local SWATCH_GAP = 6
 
 local GALLERY_ROWS = 8
 local PICKER_ROWS = 6
@@ -282,6 +284,7 @@ function UI:EnsureFrame()
     self:BuildGalleryPanel(f)
     self:BuildPickerPanel(f)
     self:BuildMembersPanel(f)
+    self:BuildColorWheel(f)
 
     tinsert(UISpecialFrames, "PixelPartyFrame")
 
@@ -295,6 +298,13 @@ function UI:EnsureFrame()
         PP.Comm:SendHello(Portraits.Active(), false)
     end)
     f:SetScript("OnHide", function()
+        -- Child side panels vanish with the window but stay "shown", and a
+        -- shown-but-invisible UISpecialFrames entry makes the next Escape
+        -- press close nothing visible instead of opening the game menu.
+        -- Hide them for real. The picker floats free on purpose.
+        UI.members:Hide()
+        UI.wheel:Hide()
+        UI.gallery:Hide()
         if UI.picker:IsShown() then
             UI:AnchorPicker()
             UI:RefreshPicker()
@@ -382,12 +392,14 @@ end
 
 function UI:BuildPalette(f)
     local bar = CreateFrame("Frame", nil, f)
-    local barWidth = Canvas.NUM_COLORS * SWATCH + (Canvas.NUM_COLORS - 1) * SWATCH_GAP
+    -- The 16 classic swatches plus the wheel button on the end.
+    local slots = Canvas.EXTENDED_BASE + 1
+    local barWidth = slots * SWATCH + (slots - 1) * SWATCH_GAP
     bar:SetSize(barWidth, SWATCH)
     bar:SetPoint("TOP", f, "TOP", 0, -66)
 
     self.rings = {}
-    for c = 0, Canvas.NUM_COLORS - 1 do
+    for c = 0, Canvas.EXTENDED_BASE - 1 do
         local btn = CreateFrame("Button", nil, bar)
         btn:SetSize(SWATCH, SWATCH)
         btn:SetPoint("LEFT", bar, "LEFT", c * (SWATCH + SWATCH_GAP), 0)
@@ -413,7 +425,59 @@ function UI:BuildPalette(f)
             UI:SelectColor(c)
         end)
     end
+    self:BuildWheelButton(bar)
     self:SelectColor(self.selectedColor)
+end
+
+-- The 17th slot on the palette row: opens the color wheel, and stands in
+-- for whichever wheel color is selected, since the row has no swatch of
+-- its own for those.
+function UI:BuildWheelButton(bar)
+    local btn = CreateFrame("Button", nil, bar)
+    btn:SetSize(SWATCH, SWATCH)
+    btn:SetPoint("LEFT", bar, "LEFT", Canvas.EXTENDED_BASE * (SWATCH + SWATCH_GAP), 0)
+
+    local ring = btn:CreateTexture(nil, "BACKGROUND")
+    ring:SetPoint("TOPLEFT", -3, 3)
+    ring:SetPoint("BOTTOMRIGHT", 3, -3)
+    ring:SetColorTexture(1, 0.82, 0)
+    ring:Hide()
+    self.wheelBtnRing = ring
+
+    local border = btn:CreateTexture(nil, "BORDER")
+    border:SetPoint("TOPLEFT", -1, 1)
+    border:SetPoint("BOTTOMRIGHT", 1, -1)
+    border:SetColorTexture(0, 0, 0)
+
+    -- Four vivid quadrants suggest the wheel; a selected wheel color
+    -- replaces them wholesale.
+    self.wheelBtnQuads = {}
+    -- { hue index, x offset, y offset }; shade 1 below picks the vivid ring.
+    local quads = {
+        { 0, 0, 0 },   -- red, top left
+        { 2, 12, 0 },  -- yellow, top right
+        { 8, 0, -12 }, -- blue, bottom left
+        { 4, 12, -12 } -- green, bottom right
+    }
+    for _, q in ipairs(quads) do
+        local t = btn:CreateTexture(nil, "ARTWORK")
+        t:SetSize(12, 12)
+        t:SetPoint("TOPLEFT", btn, "TOPLEFT", q[2], q[3])
+        local col = Canvas.PALETTE[Canvas.EXTENDED_BASE + q[1] * Canvas.WHEEL_SHADES + 1]
+        t:SetColorTexture(col[1], col[2], col[3])
+        self.wheelBtnQuads[#self.wheelBtnQuads + 1] = t
+    end
+
+    local swatch = btn:CreateTexture(nil, "OVERLAY")
+    swatch:SetAllPoints(btn)
+    swatch:Hide()
+    self.wheelBtnSwatch = swatch
+
+    btn:SetScript("OnClick", function()
+        UI:ToggleColorWheel()
+    end)
+    Tooltip(btn, "Color wheel",
+        "48 more colors. Everyone painting needs Pixel Party 0.7+ to see them; older versions keep showing whatever was painted there before, and cannot sync a canvas that uses them.")
 end
 
 function UI:SelectColor(c)
@@ -423,6 +487,29 @@ function UI:SelectColor(c)
     end
     for i, ring in pairs(self.rings) do
         ring:SetShown(i == c)
+    end
+    self:UpdateWheelButton()
+end
+
+-- The wheel button doubles as the selected swatch for wheel colors, and the
+-- wheel panel's center previews the current color whatever it is.
+function UI:UpdateWheelButton()
+    if not self.wheelBtnRing then
+        return
+    end
+    local c = self.selectedColor
+    local col = Canvas.PALETTE[c] or Canvas.PALETTE[0]
+    local extended = c >= Canvas.EXTENDED_BASE
+    self.wheelBtnRing:SetShown(extended)
+    self.wheelBtnSwatch:SetShown(extended)
+    if extended then
+        self.wheelBtnSwatch:SetColorTexture(col[1], col[2], col[3])
+    end
+    for _, q in ipairs(self.wheelBtnQuads) do
+        q:SetShown(not extended)
+    end
+    if self.wheelCenter then
+        self.wheelCenter:SetColorTexture(col[1], col[2], col[3])
     end
 end
 
@@ -1372,6 +1459,7 @@ function UI:TogglePicker()
         self.picker:Hide()
     else
         self.members:Hide()
+        self.wheel:Hide()
         self.pickerPage = 1
         self:AnchorPicker()
         self.picker:Show()
@@ -1489,9 +1577,100 @@ function UI:ToggleMembers()
         self.members:Hide()
     else
         self.picker:Hide()
+        self.wheel:Hide()
         self.memberPage = 1
         self.members:Show()
         self:RefreshMembers()
+    end
+end
+
+----------------------------------------------------------------------
+-- Color wheel panel
+--
+-- Deliberately discrete: a continuous HSV disc would offer sixteen million
+-- colors and deliver the 48 the wire encoding has room for. Real swatch
+-- buttons show exactly what is pickable, hit-test exactly, and need no
+-- texture shipped in Media/.
+----------------------------------------------------------------------
+
+-- Swatch spacing must clear the WIDEST boxes that can co-exist on
+-- neighboring buttons: the golden selection ring (half-extent 10 = 8px
+-- half-swatch + 2px inset) against a neighbor's black border (half-extent
+-- 9), so neighbors need 19px of clearance on some axis. The tight pairs:
+-- adjacent spokes across a diagonal, (2 * 54 * sin 15) / sqrt 2 = 19.8,
+-- and adjacent rings on the 30/60-degree spokes, 23 * cos 30 = 19.9.
+-- Overlap would not just look clipped — sibling buttons draw in creation
+-- order, so a neighbor's border would sit on top of the selection ring.
+-- (Ring-vs-ring never co-exists: only one color is selected at a time.)
+local WHEEL_SWATCH = 16
+local WHEEL_RING_INSET = 2 -- 3px like the palette row would need wider spacing
+local WHEEL_RADII = { 54, 77, 100, 123 } -- one radius per shade ring, pale innermost
+
+function UI:BuildColorWheel(f)
+    local g = BuildPanel(f, "PixelPartyColorWheelFrame", "Colors", 300, 320, "LEFT")
+    self.wheel = g
+
+    -- Wheel origin; swatches hang off it at polar offsets.
+    local hub = CreateFrame("Frame", nil, g)
+    hub:SetSize(1, 1)
+    hub:SetPoint("TOPLEFT", g, "TOPLEFT", 150, -167)
+
+    for hue = 0, Canvas.WHEEL_HUES - 1 do
+        -- Red at 12 o'clock, hues clockwise, like a painter's wheel.
+        local a = math.rad(hue * (360 / Canvas.WHEEL_HUES))
+        for shade = 0, Canvas.WHEEL_SHADES - 1 do
+            local c = Canvas.EXTENDED_BASE + hue * Canvas.WHEEL_SHADES + shade
+            local r = WHEEL_RADII[shade + 1]
+            local btn = CreateFrame("Button", nil, g)
+            btn:SetSize(WHEEL_SWATCH, WHEEL_SWATCH)
+            btn:SetPoint("CENTER", hub, "CENTER", r * math.sin(a), r * math.cos(a))
+
+            local ring = btn:CreateTexture(nil, "BACKGROUND")
+            ring:SetPoint("TOPLEFT", -WHEEL_RING_INSET, WHEEL_RING_INSET)
+            ring:SetPoint("BOTTOMRIGHT", WHEEL_RING_INSET, -WHEEL_RING_INSET)
+            ring:SetColorTexture(1, 0.82, 0)
+            ring:Hide()
+            self.rings[c] = ring
+
+            local border = btn:CreateTexture(nil, "BORDER")
+            border:SetPoint("TOPLEFT", -1, 1)
+            border:SetPoint("BOTTOMRIGHT", 1, -1)
+            border:SetColorTexture(0, 0, 0)
+
+            local swatch = btn:CreateTexture(nil, "ARTWORK")
+            swatch:SetAllPoints(btn)
+            local col = Canvas.PALETTE[c]
+            swatch:SetColorTexture(col[1], col[2], col[3])
+
+            btn:SetScript("OnClick", function()
+                UI:SelectColor(c)
+            end)
+        end
+    end
+
+    -- Center swatch previews the current color, wherever it came from.
+    local border = g:CreateTexture(nil, "BORDER")
+    local center = g:CreateTexture(nil, "ARTWORK")
+    center:SetSize(30, 30)
+    center:SetPoint("CENTER", hub, "CENTER", 0, 0)
+    border:SetPoint("TOPLEFT", center, "TOPLEFT", -1, 1)
+    border:SetPoint("BOTTOMRIGHT", center, "BOTTOMRIGHT", 1, -1)
+    border:SetColorTexture(0, 0, 0)
+    self.wheelCenter = center
+
+    -- The wheel's selection rings did not exist when BuildPalette restored
+    -- the saved color; re-select so a saved wheel color shows its ring.
+    self:SelectColor(self.selectedColor)
+end
+
+function UI:ToggleColorWheel()
+    if self.wheel:IsShown() then
+        self.wheel:Hide()
+    else
+        -- The left slot beside the canvas fits one panel at a time.
+        self.members:Hide()
+        self.picker:Hide()
+        self.wheel:Show()
     end
 end
 

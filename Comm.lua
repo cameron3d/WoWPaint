@@ -26,6 +26,7 @@ local OFFER_MIN_INTERVAL = 30   -- per-target throttle for snapshot offers
 local SNAP_MIN_INTERVAL = 30    -- per-requester throttle for snapshot streams
 local LOCK_NAG_INTERVAL = 30    -- per-sender throttle for "it's locked" replies
 local SIZE_WARN_INTERVAL = 300  -- per-sender throttle for canvas-size mismatch nags
+local COLOR_WARN_INTERVAL = 300 -- per-sender throttle for old-version color nags
 local INVITE_TTL = 120          -- seconds an outgoing invite stays honorable
 
 -- Each message type is only ever produced on one kind of channel; anything
@@ -50,6 +51,8 @@ Comm.lastSnapAt = {}          -- [pid..";"..sender] = time
 Comm.lastRejectAt = {}        -- [pid..";"..sender] = time
 Comm.lastLockNagAt = {}       -- [pid..";"..sender] = time
 Comm.lastSizeWarnAt = {}      -- [pid..";"..sender] = time
+Comm.legacyColorPeers = {}    -- [pid] = { [sender] = true } for pre-0.7 hellos
+Comm.lastColorWarnAt = {}     -- [pid..";"..sender] = time
 Comm.pendingInvites = {}      -- [pid..";"..target] = expiry time
 Comm.sync = nil               -- active inbound snapshot transfer {pid, source, ...}
 Comm.offerWindow = nil        -- open offer-collection window {pid, rev, sender}
@@ -225,6 +228,9 @@ function Comm:Paint(p, x, y, color)
         self:FlushPaintOps()
     end
     if Canvas.SetPixel(p.size, p.cells, x, y, color) then
+        if color >= Canvas.EXTENDED_BASE then
+            self:WarnLegacyColors(p)
+        end
         self.pendingPid = p.id
         PP.UI:UpdateCell(p, x, y)
         self.pendingOps[#self.pendingOps + 1] = PP.EncodeOp(p.size, x, y, color)
@@ -406,6 +412,59 @@ function Comm:WarnSizeMismatch(p, theirSize, sender)
         theirSize and (theirSize .. "x" .. theirSize) or "64x64 (older version)", p.size))
 end
 
+-- A peer announcing a pre-0.7 version cannot see the wheel colors: its op
+-- loop skips them (each cell keeps whatever was painted there before) and
+-- its snapshot decoder rejects any canvas containing one. Remember every
+-- such peer per portrait — an upgrade hello clears only its own sender, so
+-- one peer updating cannot hide another that has not — and say so,
+-- throttled like size mismatches, whenever wheel colors and a legacy peer
+-- actually meet: here when the canvas already has one, and from Paint when
+-- one is used. Best effort by construction: it only knows peers whose
+-- hello arrived this session, so a legacy peer at equal revision that
+-- never hellos stays invisible.
+function Comm:NoteColorSupport(p, version, sender)
+    local peers = self.legacyColorPeers[p.id]
+    if PP.VersionAtLeast(version, 0, 7) then
+        if peers then
+            peers[sender] = nil
+        end
+        return
+    end
+    if not peers then
+        peers = {}
+        self.legacyColorPeers[p.id] = peers
+    end
+    peers[sender] = true
+    if Canvas.HasExtendedColors(p.size, p.cells) then
+        self:WarnLegacyColors(p)
+    end
+end
+
+-- Warn about one still-relevant legacy peer, at most once per peer per
+-- interval. A member uninvited since its hello no longer paints or syncs
+-- this portrait, so it is dropped rather than nagged about.
+function Comm:WarnLegacyColors(p)
+    local peers = self.legacyColorPeers[p.id]
+    if not peers then
+        return
+    end
+    local now = GetTime()
+    for sender in pairs(peers) do
+        if p.dist == "MEMBERS" and not Portraits.IsMember(p, sender) then
+            peers[sender] = nil
+        else
+            local key = p.id .. ";" .. sender
+            local last = self.lastColorWarnAt[key]
+            if not last or now - last >= COLOR_WARN_INTERVAL then
+                self.lastColorWarnAt[key] = now
+                PP.Print(("%s runs an older Pixel Party that only knows the classic 16 colors. Wheel strokes on '%s' never reach them (they keep seeing what was there before), and they cannot sync it until they update."):format(
+                    Ambiguate(sender, "short"), p.name))
+                return
+            end
+        end
+    end
+end
+
 function Comm:OnHello(p, rev, sender)
     if rev < p.rev then
         self:ScheduleOffer(p, sender)
@@ -430,16 +489,18 @@ function Comm:ScheduleOffer(p, sender)
     self.lastOfferAt[key] = now
     local pid = p.id
     -- Random delay spreads out replies when many peers are ahead of the
-    -- requester; the requester only accepts one offer anyway.
+    -- requester; the requester only accepts one offer anyway. The version
+    -- rides along so requesters can prefer sources that saw every color;
+    -- pre-0.7 clients match the rev off the front and ignore the rest.
     C_Timer.After(0.5 + math.random() * 2, function()
         local cur = Portraits.Get(pid)
         if cur then
-            self:Whisper("O" .. pid .. ":" .. cur.rev, sender)
+            self:Whisper("O" .. pid .. ":" .. cur.rev .. ":" .. PP.VERSION, sender)
         end
     end)
 end
 
-function Comm:OnOffer(p, rev, sender)
+function Comm:OnOffer(p, rev, sender, version)
     if self.sync or rev <= p.rev then
         return
     end
@@ -453,25 +514,48 @@ function Comm:OnOffer(p, rev, sender)
     if w.pid ~= p.id then
         return -- one negotiation at a time; later hellos re-trigger
     end
-    if not w.rev or rev > w.rev then
-        w.rev = rev
-        w.sender = sender
+    -- A pre-0.7 source is a last resort: it counts batches whose wheel
+    -- colors it never applied, so its revision claims parity its pixels do
+    -- not have. Any modern offer beats every legacy one; within a class,
+    -- highest revision wins. (A version-less offer is pre-0.7 by
+    -- definition — 0.7.0 is the first version that sends one.)
+    if PP.VersionAtLeast(version, 0, 7) then
+        if not w.rev or rev > w.rev then
+            w.rev = rev
+            w.sender = sender
+        end
+    else
+        if not w.legacyRev or rev > w.legacyRev then
+            w.legacyRev = rev
+            w.legacySender = sender
+        end
     end
 end
 
 function Comm:AcceptBestOffer()
     local w = self.offerWindow
     self.offerWindow = nil
-    if not w or not w.sender or self.sync then
+    if not w or self.sync then
+        return
+    end
+    local sender, rev, legacy = w.sender, w.rev, false
+    if not sender then
+        sender, rev, legacy = w.legacySender, w.legacyRev, true
+    end
+    if not sender then
         return
     end
     local p = Portraits.Get(w.pid)
-    if not p or w.rev <= p.rev then
+    if not p or rev <= p.rev then
         return
+    end
+    if legacy and Canvas.HasExtendedColors(p.size, p.cells) then
+        PP.Print(("Syncing '%s' from %s, whose older Pixel Party never saw its wheel colors; they will come back as classic colors or background."):format(
+            p.name, Ambiguate(sender, "short")))
     end
     self.sync = {
         pid = p.id,
-        source = w.sender,
+        source = sender,
         chunks = {},
         received = 0,
         total = nil,
@@ -480,7 +564,7 @@ function Comm:AcceptBestOffer()
         lastAt = GetTime(),
     }
     self:DiscardBufferedFor(p.id)
-    self:Whisper("G" .. p.id, w.sender)
+    self:Whisper("G" .. p.id, sender)
     PP.UI:UpdateStatus()
     self:WatchSync()
 end
@@ -813,7 +897,7 @@ function Comm:OnJoin(p, sender)
     -- Offer rather than streaming blind: the standard offer/G/S flow gives
     -- the joiner its usual guards, timeouts, and single-transfer rule.
     if p.rev > 0 then
-        self:Whisper("O" .. p.id .. ":" .. p.rev, sender)
+        self:Whisper("O" .. p.id .. ":" .. p.rev .. ":" .. PP.VERSION, sender)
     end
     PP.Print(Ambiguate(sender, "short") .. " joined portrait '" .. p.name .. "'.")
     PP.UI:UpdateAll()
@@ -1132,8 +1216,11 @@ function Comm:OnMessage(prefix, text, channel, sender)
         -- "H<id>:<rev>:<version>" yields nil rather than a digit scavenged
         -- out of its version string.
         local theirSize = tonumber(rest:match("^:%d+:[^:]*:(%d+)$"))
+        -- May be nil: the oldest clients sent bare "H<id>:<rev>".
+        local theirVersion = rest:match("^:%d+:([^:]+)")
         if rev then
             self:WarnSizeMismatch(p, theirSize, sender)
+            self:NoteColorSupport(p, theirVersion, sender)
             self:OnHello(p, rev, sender)
         end
     elseif kind == "Q" then
@@ -1143,8 +1230,10 @@ function Comm:OnMessage(prefix, text, channel, sender)
         end
     elseif kind == "O" then
         local rev = tonumber(rest:match("^:(%d+)"))
+        -- Absent on pre-0.7 offers ("O<id>:<rev>").
+        local theirVersion = rest:match("^:%d+:([^:]+)")
         if rev then
-            self:OnOffer(p, rev, sender)
+            self:OnOffer(p, rev, sender, theirVersion)
         end
     elseif kind == "G" then
         self:OnGet(p, sender)

@@ -41,7 +41,60 @@ local function check(cond, label)
     end
 end
 
-check(PP.VERSION == "0.6.1", "runtime version matches the current release")
+check(PP.VERSION == "0.7.0", "runtime version matches the current release")
+
+-- Version comparison --------------------------------------------------------
+
+check(PP.VersionAtLeast("0.7.0", 0, 7), "VersionAtLeast accepts the exact version")
+check(PP.VersionAtLeast("0.7", 0, 7), "VersionAtLeast accepts major.minor with no patch")
+check(PP.VersionAtLeast("1.0.0", 0, 7), "VersionAtLeast accepts a later major")
+check(PP.VersionAtLeast("10.2", 0, 7), "VersionAtLeast accepts a double-digit major")
+check(PP.VersionAtLeast("0.10", 0, 7),
+    "VersionAtLeast compares numerically, not as strings ('0.10' < '0.7' lexically)")
+check(not PP.VersionAtLeast("0.6.1", 0, 7), "VersionAtLeast rejects an earlier version")
+check(not PP.VersionAtLeast(nil, 0, 7), "VersionAtLeast reads an absent version as older")
+check(not PP.VersionAtLeast("garbage", 0, 7), "VersionAtLeast reads a malformed version as older")
+check(not PP.VersionAtLeast("0", 0, 7), "VersionAtLeast requires a minor component")
+
+-- Palette -------------------------------------------------------------------
+--
+-- Palette indices are wire format: these pins exist so no refactor of the
+-- generator can silently reshuffle published colors.
+
+check(Canvas.NUM_COLORS == 64 and Canvas.EXTENDED_BASE == 16
+    and Canvas.EXTENDED_BASE + Canvas.WHEEL_HUES * Canvas.WHEEL_SHADES == Canvas.NUM_COLORS,
+    "the wheel fills the palette exactly from EXTENDED_BASE to 63")
+ok = true
+for c = 0, Canvas.NUM_COLORS - 1 do
+    local col = Canvas.PALETTE[c]
+    if type(col) ~= "table" then
+        ok = false
+    else
+        for i = 1, 3 do
+            if type(col[i]) ~= "number" or col[i] < 0 or col[i] > 1 then
+                ok = false
+            end
+        end
+    end
+end
+check(ok and Canvas.PALETTE[64] == nil, "all 64 palette entries are well-formed RGB and no more exist")
+
+local function near(a, b)
+    return math.abs(a - b) < 1e-9
+end
+local function colorIs(c, r, g, b)
+    local col = Canvas.PALETTE[c]
+    return col and near(col[1], r) and near(col[2], g) and near(col[3], b)
+end
+check(colorIs(0, 1, 1, 1) and colorIs(3, 0.133, 0.133, 0.133) and colorIs(5, 0.898, 0, 0),
+    "the classic 16 keep their published values")
+check(colorIs(17, 1, 0, 0) and colorIs(33, 0, 1, 0) and colorIs(49, 0, 0, 1),
+    "the vivid ring hits pure red, green and blue at hues 0, 4 and 8")
+check(colorIs(16, 1, 0.62, 0.62), "the pale ring starts at pale red")
+check(colorIs(63, 0.4, 0, 0.2), "index 63 is the dark shade of the last hue")
+
+local hr, hg, hb = Canvas.HSVToRGB(390, 1, 1)
+check(near(hr, 1) and near(hg, 0.5) and near(hb, 0), "HSVToRGB wraps hue past 360")
 
 -- Char codec ---------------------------------------------------------------
 
@@ -106,8 +159,17 @@ check(#data % 2 == 0, "serialized form has even length")
 check(Canvas.Deserialize(SZ, nil) == nil, "Deserialize rejects nil")
 check(Canvas.Deserialize(SZ, "abc") == nil, "Deserialize rejects odd length")
 check(Canvas.Deserialize(SZ, "!!") == nil, "Deserialize rejects unknown chars")
-check(Canvas.Deserialize(SZ, "0G") == nil, "Deserialize rejects color >= 16")
 check(Canvas.Deserialize(SZ, data .. "00") == nil, "Deserialize rejects cell overflow")
+
+-- Every alphabet character is a valid color since 0.7; a canvas painted
+-- entirely in the last color must round-trip.
+local loud = {}
+for i = 1, Canvas.Cells(SZ) do
+    loud[i] = Canvas.NUM_COLORS - 1
+end
+back = Canvas.Deserialize(SZ, Canvas.Serialize(SZ, loud))
+check(back ~= nil and back[1] == 63 and back[Canvas.Cells(SZ)] == 63,
+    "a canvas of wheel colors round-trips")
 check(Canvas.Deserialize(SZ, data:sub(1, #data - 2)) == nil, "Deserialize rejects short payloads")
 
 -- SetPixel bounds ----------------------------------------------------------
@@ -119,8 +181,13 @@ check(Canvas.SetPixel(SZ, cells, 0, 1, 5) == false, "SetPixel rejects x < 1")
 check(Canvas.SetPixel(SZ, cells, 65, 1, 5) == false, "SetPixel rejects x > 64")
 check(Canvas.SetPixel(SZ, cells, 1, 0, 5) == false, "SetPixel rejects y < 1")
 check(Canvas.SetPixel(SZ, cells, 1, 65, 5) == false, "SetPixel rejects y > 64")
-check(Canvas.SetPixel(SZ, cells, 1, 2, 16) == false, "SetPixel rejects color >= 16")
+check(Canvas.SetPixel(SZ, cells, 1, 2, 63) == true, "SetPixel accepts the last wheel color")
+check(Canvas.SetPixel(SZ, cells, 1, 3, 64) == false, "SetPixel rejects color >= 64")
 check(Canvas.SetPixel(SZ, cells, 1, 2, -1) == false, "SetPixel rejects color < 0")
+check(Canvas.HasExtendedColors(SZ, cells) == true, "HasExtendedColors sees the wheel color")
+cells[Canvas.Index(SZ, 1, 2)] = 0
+check(Canvas.HasExtendedColors(SZ, cells) == false,
+    "HasExtendedColors ignores a canvas of classic colors")
 check(Canvas.GetPixel(SZ, cells, 1, 1) == 5, "GetPixel reads back the value")
 
 -- A 128 canvas must not be readable as a 64 one, and vice versa.
@@ -181,7 +248,7 @@ check(#PP.EncodeOp(64, 64, 64, 15) == 3 and #PP.EncodeOp(128, 1, 1, 0) == 5,
 ok = true
 for _, size in ipairs(Canvas.SIZES) do
     for _, pt in ipairs({ { 1, 1, 0 }, { size, size, 15 }, { 1, size, 7 }, { size, 1, 3 },
-        { 65, 100, 9 }, { 33, 17, 5 } }) do
+        { 65, 100, 9 }, { 33, 17, 5 }, { 2, 2, 63 }, { 70, 3, 63 } }) do
         local x, y, c = pt[1], pt[2], pt[3]
         if x <= size and y <= size then
             local dx, dy, dc = PP.DecodeOp(size, PP.EncodeOp(size, x, y, c), 1)
@@ -654,6 +721,99 @@ check(#Comm.queue == 4, "a MEMBERS batch is queued once per other member")
 Comm:DropQueuedPaints("eeeeee")
 check(#Comm.queue == 0, "a remote clear drops every queued copy")
 check(rev.rev == 0, "each dropped batch un-counts exactly one revision")
+
+-- Old-version peers and wheel colors -----------------------------------------
+
+local legacy = newShared("gggggg", OWNER, { OWNER, OTHER, "Me-Testrealm" })
+local warns = {}
+PP.Print = function(msg)
+    warns[#warns + 1] = tostring(msg)
+end
+Comm:OnMessage("PixelParty", "Hgggggg:0:0.6.1:64", "WHISPER", OWNER)
+check(#warns == 0, "an old-version hello alone does not warn")
+legacy.cells[1] = 40
+Comm:OnMessage("PixelParty", "Hgggggg:0:0.6.1:64", "WHISPER", OWNER)
+check(#warns == 1 and warns[1]:find("older Pixel Party", 1, true) ~= nil,
+    "an old-version hello warns once the canvas holds wheel colors")
+now = now + 10
+Comm:OnMessage("PixelParty", "Hgggggg:0:0.6.1:64", "WHISPER", OWNER)
+check(#warns == 1, "the wheel-color warning is throttled")
+now = now + 1000
+Comm:Paint(legacy, 5, 5, 40)
+check(#warns == 2, "painting a wheel color warns while a legacy peer is known")
+-- Legacy peers are a set: a second one warns on its own hello, and one
+-- upgrading must not silence warnings about the other.
+Comm:OnMessage("PixelParty", "Hgggggg:0:0.6.1:64", "WHISPER", OTHER)
+check(#warns == 3 and warns[3]:find("Other", 1, true) ~= nil,
+    "a second legacy peer warns on its own hello")
+Comm:OnMessage("PixelParty", "Hgggggg:0:0.7.0:64", "WHISPER", OTHER)
+now = now + 1000
+Comm:Paint(legacy, 6, 6, 40)
+check(#warns == 4 and warns[4]:find("Owner", 1, true) ~= nil,
+    "one peer upgrading does not hide another still-legacy peer")
+Comm:OnMessage("PixelParty", "Hgggggg:0:0.7.0:64", "WHISPER", OWNER)
+now = now + 1000
+Comm:Paint(legacy, 7, 7, 40)
+check(#warns == 4, "no more warnings once every legacy peer upgrades")
+-- A legacy member uninvited since its hello is dropped, not nagged about.
+Comm:OnMessage("PixelParty", "Hgggggg:0:0.6.1:64", "WHISPER", OTHER)
+check(#warns == 5, "the returning legacy peer warns again after the throttle")
+Portraits.RemoveMembers(legacy, { OTHER })
+now = now + 1000
+Comm:Paint(legacy, 8, 8, 40)
+check(#warns == 5, "an uninvited legacy member is dropped, not warned about")
+now = now + 1000
+Comm:Paint(legacy, 9, 9, 5)
+check(#warns == 5, "classic colors never warn")
+PP.Print = noop
+
+-- Snapshot offers prefer sources that saw every color -------------------------
+
+local offerP = newShared("iiiiii", OWNER, { OWNER, OTHER, "Me-Testrealm" })
+Comm.queue = {}
+Comm:OnMessage("PixelParty", "Oiiiiii:5", "WHISPER", OTHER)       -- legacy, first
+Comm:OnMessage("PixelParty", "Oiiiiii:5:0.7.0", "WHISPER", OWNER) -- modern, same rev
+Comm:AcceptBestOffer()
+check(Comm.sync ~= nil and Comm.sync.source == OWNER,
+    "a modern offer beats an earlier same-rev legacy offer")
+local getMsg = sent("Giiiiii")
+check(getMsg ~= nil and getMsg.target == OWNER, "the snapshot request goes to the modern source")
+Comm.sync = nil
+
+-- ...but a lone legacy offer is still usable, with a warning when it is
+-- about to overwrite wheel pixels we hold.
+local lone = newShared("jjjjjj", OWNER, { OWNER, "Me-Testrealm" })
+lone.cells[1] = 40
+warns = {}
+PP.Print = function(msg)
+    warns[#warns + 1] = tostring(msg)
+end
+Comm:OnMessage("PixelParty", "Ojjjjjj:5", "WHISPER", OWNER)
+Comm:AcceptBestOffer()
+check(Comm.sync ~= nil and Comm.sync.source == OWNER, "a lone legacy offer is accepted")
+check(#warns == 1 and warns[1]:find("older Pixel Party", 1, true) ~= nil,
+    "accepting a legacy snapshot over wheel pixels warns")
+-- The request must go to the legacy source itself. Aiming it anywhere else
+-- (the bug: at the empty modern slot, so at nobody) leaves the transfer
+-- permanently pending, and every stroke for the portrait buffers unseen
+-- behind it until the sync watchdog gives up.
+local legacyGet = sent("Gjjjjjj")
+check(legacyGet ~= nil and legacyGet.target == OWNER,
+    "the snapshot request goes to the legacy source")
+PP.Print = noop
+Comm.sync = nil
+
+-- A joiner's welcome offer must carry our version, or the joiner files the
+-- inviter under "legacy" and prefers any other source over it.
+local joinP = Portraits.Create("JoinOffer", "MEMBERS", "kkkkkk", "Me-Testrealm")
+Portraits.AddMembers(joinP, { "Me-Testrealm" })
+joinP.rev = 4
+Comm.queue = {}
+Comm:SendInvite(joinP, OTHER)
+Comm:OnMessage("PixelParty", "Jkkkkkk", "WHISPER", OTHER)
+local joinOffer = sent("Okkkkkk")
+check(joinOffer ~= nil and joinOffer.msg == "Okkkkkk:4:" .. PP.VERSION,
+    "the offer made to a fresh joiner announces our version")
 
 -- SavedVariables migration and sanitising --------------------------------
 --

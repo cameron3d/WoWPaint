@@ -433,3 +433,77 @@ release metadata. This is intentionally a fresh technical identity: existing dat
 the former SavedVariables name is not migrated, and clients using the former wire prefix do not
 interoperate with Pixel Party. Install the addon only as `Interface/AddOns/PixelParty/`; remove
 the former addon folder to avoid loading both identities at once.
+
+---
+
+# v0.7 — Color wheel and the 64-color palette (2026-08-12, user-requested)
+
+The palette grows from the classic 16 to **64 colors**, and the new 48 are picked from a
+**color wheel**: a side panel of 12 hue spokes × 4 shade rings beside the canvas window,
+opened by a wheel button at the right end of the palette row.
+
+## Why 64, and why these 48
+
+Every color on the wire is one character of the 64-glyph alphabet, in both stroke ops and RLE
+snapshots. 64 is therefore the largest palette that changes **nothing** about the wire format:
+op widths stay 3/5 chars, snapshot runs stay 2 chars, and the untrusted-input rules keep
+working because any decodable character is now a valid color. Full RGB was rejected — it would
+quadruple op size, break every client, and gut RLE compression for no gain at pixel-art scale.
+
+Indices 0–15 stay the classic r/place 16, frozen forever — they are wire format and
+SavedVariables format. Indices 16–63 are generated at load from HSV: index
+`16 + hue*4 + shade`, hue 0–11 stepping 30° from red, shade 0–3 running pale → vivid → deep →
+dark (`WHEEL_SHADE_SV` in Canvas.lua). Generated rather than hand-listed so the wheel layout
+and the palette can never disagree; the desktop suite pins spot values so a tweak to the
+generator cannot silently reshuffle published indices.
+
+## The wheel is discrete on purpose
+
+A continuous HSV disc would offer sixteen million colors and deliver 48. The wheel panel
+instead shows exactly the pickable swatches, arranged as a wheel: shade rings at four radii,
+the pale ring innermost, with a center swatch previewing the current color. Each swatch is a
+real Button (exact hit-testing, no texture math, nothing new to ship in `Media/`). Selection
+reuses the palette row's golden-ring treatment via the same `UI.rings` table, keyed by color
+index. The panel is a "LEFT" `BuildPanel` sibling of Members and stays open while painting;
+the palette row keeps the classic 16 one click away (row gap tightened 8px → 6px to make room
+for the wheel button).
+
+## Old clients (< 0.7)
+
+- **Live strokes** carrying colors ≥ 16 are skipped by their `ApplyOps` guard, but the batch
+  still bumps their revision, so they stay rev-aligned and never re-sync over it. Each
+  skipped cell keeps showing whatever was painted there before — untouched background where
+  the canvas was blank, stale classic art where wheel colors overpainted it.
+- **Snapshots** containing an extended color fail their `Deserialize` whole, so a stale old
+  client cannot pull a canvas that uses extended colors until it updates.
+- **SavedVariables** written by 0.7 load fine on old clients: `SanitizeCells` zeroes unknown
+  colors.
+
+Because a legacy client counts batches it never applied, its revision claims a parity its
+pixels do not have — which would let its snapshot win an offer race and silently strip a
+canvas's wheel colors for modern joiners. Offers therefore carry the sender's version since
+0.7 (older clients match the revision off the front and ignore the rest, as hellos already
+proved), and offer selection prefers any modern source over any legacy one; a legacy source
+is used only when it is the sole offer, with a warning when that overwrites wheel pixels we
+hold. This keeps "higher revision wins wholesale" for real divergence while refusing to
+treat a color-blind copy as authoritative.
+
+Mirroring the 128×128 precedent — warn rather than silently mismatch — the hello's existing
+version field is now read. Comm keeps a per-portrait set of peers whose hello announced
+< 0.7 (an upgrade hello clears only its own sender, so one peer updating cannot hide
+another), and warns — throttled per peer, like size warnings — whenever extended colors and
+a known legacy peer meet: at hello time if the canvas already contains an extended pixel
+(`Canvas.HasExtendedColors`), and on extended-color paints otherwise. Members uninvited
+since their hello are dropped from the set rather than nagged about. The detection is best
+effort by construction and this is accepted: the set only holds peers whose hello arrived
+this session, so a legacy peer at equal revision that never hellos (or one seen only before
+a `/reload`) stays invisible until it next announces itself. The Shared canvas keeps working
+across versions in classic colors only; painting extended colors on it is allowed but
+triggers the warning when an old peer is known.
+
+## Testing
+
+Desktop suite additions: palette integrity (64 well-formed entries, classic 16 byte-identical,
+HSV spot anchors like pure red/green/blue at the vivid ring), `HSVToRGB`, round-trips of ops
+and snapshots at color 63, `SetPixel`/`Deserialize` bounds moved to 64, `PP.VersionAtLeast`
+parsing (absent and malformed versions read as legacy), and `Canvas.HasExtendedColors`.
