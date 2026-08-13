@@ -1,6 +1,6 @@
 local ADDON_NAME, PP = ...
 
-PP.VERSION = "0.7.0"
+PP.VERSION = "0.7.1"
 
 -- True when a peer's announced version string is at least major.minor.
 -- Absent or malformed versions read as older: peers that never say their

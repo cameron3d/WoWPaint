@@ -41,7 +41,7 @@ local function check(cond, label)
     end
 end
 
-check(PP.VERSION == "0.7.0", "runtime version matches the current release")
+check(PP.VERSION == "0.7.1", "runtime version matches the current release")
 
 -- Version comparison --------------------------------------------------------
 
