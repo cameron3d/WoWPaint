@@ -194,6 +194,29 @@ function Portraits.Unremove(p, name)
     return false
 end
 
+-- Typed names (invite/uninvite boxes, slash commands) carry whatever case
+-- the player typed, while rosters and tombstones hold canonical names from
+-- the wire, and every comparison against them is case-sensitive. Resolve a
+-- typed name to its stored casing first, or a lowercase typo silently
+-- misses — worst on the tombstone path, where the missed Unremove leaves
+-- every peer refusing the re-invited member while both sides print success.
+-- Names are unique case-insensitively in WoW, so folding cannot conflate
+-- two players; unknown names pass through untouched.
+function Portraits.ResolveName(p, name)
+    if not name then
+        return nil
+    end
+    local folded = name:lower()
+    local function find(list)
+        for _, m in ipairs(list or {}) do
+            if m:lower() == folded then
+                return m
+            end
+        end
+    end
+    return find(p.members) or find(p.removed) or name
+end
+
 function Portraits.FindByName(name)
     name = Portraits.SanitizeName(name):lower()
     if name == "" then

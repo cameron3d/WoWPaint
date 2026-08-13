@@ -28,6 +28,7 @@ local LOCK_NAG_INTERVAL = 30    -- per-sender throttle for "it's locked" replies
 local SIZE_WARN_INTERVAL = 300  -- per-sender throttle for canvas-size mismatch nags
 local COLOR_WARN_INTERVAL = 300 -- per-sender throttle for old-version color nags
 local INVITE_TTL = 120          -- seconds an outgoing invite stays honorable
+Comm.INVITE_TTL = INVITE_TTL    -- exported for Core's SavedVariables sanitizer
 
 -- Each message type is only ever produced on one kind of channel; anything
 -- arriving elsewhere is forged (e.g. a whispered clear from a stranger).
@@ -53,7 +54,6 @@ Comm.lastLockNagAt = {}       -- [pid..";"..sender] = time
 Comm.lastSizeWarnAt = {}      -- [pid..";"..sender] = time
 Comm.legacyColorPeers = {}    -- [pid] = { [sender] = true } for pre-0.7 hellos
 Comm.lastColorWarnAt = {}     -- [pid..";"..sender] = time
-Comm.pendingInvites = {}      -- [pid..";"..target] = expiry time
 Comm.sync = nil               -- active inbound snapshot transfer {pid, source, ...}
 Comm.offerWindow = nil        -- open offer-collection window {pid, rev, sender}
 
@@ -800,6 +800,29 @@ end
 -- Invitations and roster
 ----------------------------------------------------------------------
 
+-- Pending invites are stored under the name the inviter typed but looked up
+-- under the canonical sender of the join ack, so the name half of the key
+-- must be case-insensitive: names are unique case-insensitively in WoW, and
+-- a case-sensitive match would silently drop the ack of anyone invited as
+-- "bob", leaving the roster without them and the portrait forever unsynced.
+-- The pid half stays as-is — portrait ids ARE case-sensitive. (:lower()
+-- only folds ASCII; a non-ASCII letter typed in the wrong case still
+-- misses, exactly as every case missed before.)
+local function InviteKey(pid, name)
+    return pid .. ";" .. name:lower()
+end
+
+-- Pending invites live in SavedVariables, not in Comm's session state: a
+-- reload between sending an invite and the target's accept would otherwise
+-- wipe them and silently discard the join ack. Expiries are wall-clock
+-- time(), never GetTime() session uptime — a persisted uptime from a long
+-- session would read as unexpired for the whole of the next one, holding
+-- the trust window open indefinitely.
+local function PendingInvites()
+    PP.db.pendingInvites = PP.db.pendingInvites or {}
+    return PP.db.pendingInvites
+end
+
 function Comm:SendInvite(p, target)
     if p.dist ~= "MEMBERS" then
         return false, "Only member portraits can send invites (not the Shared canvas)."
@@ -808,6 +831,9 @@ function Comm:SendInvite(p, target)
     if not target then
         return false, "No player name given."
     end
+    -- Adopt the roster/tombstone casing for typed names; the checks below
+    -- compare case-sensitively.
+    target = Portraits.ResolveName(p, target)
     if Portraits.IsMember(p, target) then
         return false, Ambiguate(target, "short") .. " is already a member."
     end
@@ -824,22 +850,34 @@ function Comm:SendInvite(p, target)
     if #(p.members or {}) >= Portraits.MAX_MEMBERS then
         return false, "This portrait is at its member limit."
     end
-    local now = GetTime()
-    -- Sweep invites that aged out, so a long session of inviting cannot grow
+    local now = time()
+    -- Sweep invites that aged out, so a long run of inviting cannot grow
     -- the table without bound.
-    for key, expiry in pairs(self.pendingInvites) do
+    local invites = PendingInvites()
+    for key, expiry in pairs(invites) do
         if now > expiry then
-            self.pendingInvites[key] = nil
+            invites[key] = nil
         end
     end
-    self.pendingInvites[p.id .. ";" .. target] = now + INVITE_TTL
+    invites[InviteKey(p.id, target)] = now + INVITE_TTL
     self:Whisper("I" .. p.id .. ":" .. (p.owner or "") .. ":" .. p.size .. ":" .. p.name, target)
     return true
 end
 
 function Comm:OnInvite(id, rest, sender)
-    if Portraits.Get(id) then
-        return -- we already have this portrait
+    local existing = Portraits.Get(id)
+    if existing then
+        -- We already have this portrait. A re-invite from a member we
+        -- already trust is the inviter repairing a half-joined roster (our
+        -- J ack was lost to a crash, or to an older version's case-
+        -- sensitive invite matching): ack again so they can re-add us. No new
+        -- authority flows in either direction — we only re-ack someone
+        -- already on our own roster, and their OnJoin still demands the
+        -- fresh pending invite their own re-invite just recorded.
+        if existing.dist == "MEMBERS" and Portraits.IsMember(existing, sender) then
+            self:Whisper("J" .. id, sender)
+        end
+        return
     end
     -- Strict: an invite from an older addon has no size field and will not
     -- match, which is what we want -- it would create a canvas of the wrong
@@ -886,12 +924,13 @@ function Comm:AcceptInvite(data)
 end
 
 function Comm:OnJoin(p, sender)
-    local key = p.id .. ";" .. sender
-    local expiry = self.pendingInvites[key]
-    if not expiry or GetTime() > expiry then
+    local invites = PendingInvites()
+    local key = InviteKey(p.id, sender)
+    local expiry = invites[key]
+    if not expiry or time() > expiry then
         return
     end
-    self.pendingInvites[key] = nil
+    invites[key] = nil
     Portraits.AddMembers(p, { sender })
     self:SendRoster(p)
     -- Offer rather than streaming blind: the standard offer/G/S flow gives
@@ -1002,6 +1041,10 @@ function Comm:SendKick(p, name)
     if not name then
         return false, "No player name given."
     end
+    -- Typed names must match the roster's casing for the checks below, and
+    -- the tombstone gossiped to peers must be canonical or their own
+    -- case-sensitive IsRemoved never matches it.
+    name = Portraits.ResolveName(p, name)
     if Portraits.IsOwner(p, name) then
         return false, "The creator cannot be uninvited."
     end
@@ -1011,7 +1054,7 @@ function Comm:SendKick(p, name)
     -- Tell them before dropping them: once they are off the roster, Send no
     -- longer routes anything their way.
     self:Whisper("K" .. p.id, name)
-    self.pendingInvites[p.id .. ";" .. name] = nil
+    PendingInvites()[InviteKey(p.id, name)] = nil
     Portraits.RemoveMembers(p, { name })
     self:SendRoster(p)
     PP.UI:UpdateAll()

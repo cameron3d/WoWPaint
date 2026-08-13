@@ -130,6 +130,25 @@ local function InitDB()
         end
     end
 
+    -- Pending portrait invites ride SavedVariables so a reload between an
+    -- invite and its accept cannot orphan the joiner (Comm consults them
+    -- when the join ack arrives). Expiries are wall-clock time(). Junk and
+    -- expired entries are dropped, and the rest are clamped so a corrupt
+    -- file cannot mint an invite that outlives the TTL.
+    local invites = {}
+    if type(db.pendingInvites) == "table" then
+        local nowT = time()
+        local ttl = PP.Comm.INVITE_TTL
+        for key, expiry in pairs(db.pendingInvites) do
+            if type(key) == "string" and Portraits.ValidId(key:sub(1, 6))
+                and key:sub(7, 7) == ";" and #key > 7
+                and type(expiry) == "number" and expiry > nowT then
+                invites[key] = math.min(expiry, nowT + ttl)
+            end
+        end
+    end
+    db.pendingInvites = invites
+
     if not db.portraits[db.activeId] then
         db.activeId = Portraits.SHARED_ID
     end

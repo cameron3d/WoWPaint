@@ -407,6 +407,17 @@ check(Portraits.Unremove(kicked, "Ann-Realm") == true, "Unremove lifts a tombsto
 Portraits.AddMembers(kicked, { "Ann-Realm" })
 check(Portraits.IsMember(kicked, "Ann-Realm"), "re-invite works once the tombstone is lifted")
 
+-- Typed names arrive in whatever case the player typed; rosters and
+-- tombstones hold canonical wire names. ResolveName adopts the stored
+-- casing so the case-sensitive comparisons downstream cannot silently miss.
+check(Portraits.ResolveName(kicked, "ann-realm") == "Ann-Realm",
+    "ResolveName adopts the roster's stored casing")
+check(Portraits.ResolveName(kicked, "Stranger-Realm") == "Stranger-Realm",
+    "ResolveName passes unknown names through")
+Portraits.RemoveMembers(kicked, { "Ben-Realm" })
+check(Portraits.ResolveName(kicked, "BEN-REALM") == "Ben-Realm",
+    "ResolveName resolves tombstoned names too")
+
 -- Drawing tools --------------------------------------------------------------
 
 local function collect(fn)
@@ -815,6 +826,72 @@ local joinOffer = sent("Okkkkkk")
 check(joinOffer ~= nil and joinOffer.msg == "Okkkkkk:4:" .. PP.VERSION,
     "the offer made to a fresh joiner announces our version")
 
+-- The join ack must be honored however the inviter typed the name. The
+-- pending-invite key comes from the typed target, the lookup key from the
+-- canonical sender; if the match is case-sensitive, a lowercase-typed invite
+-- silently never lands on the roster and the portrait stays forever
+-- unsynced with everyone painting their own copy.
+local caseP = Portraits.Create("CaseInvite", "MEMBERS", "llllll", "Me-Testrealm")
+Portraits.AddMembers(caseP, { "Me-Testrealm" })
+Comm.queue = {}
+Comm:SendInvite(caseP, "other-testrealm")                  -- typed lowercase
+Comm:OnMessage("PixelParty", "Jllllll", "WHISPER", OTHER)  -- canonical ack
+check(Portraits.IsMember(caseP, OTHER),
+    "a lowercase-typed invite still admits the joiner's canonical ack")
+check(sent("Mllllll") ~= nil,
+    "the roster gossip goes out after the case-mismatched join")
+
+-- The same case trap, one layer deeper: re-inviting a previously uninvited
+-- member with a wrong-cased name must still find the tombstone. Missing it
+-- skips the Unremove and its "+name" broadcast, so every peer keeps the
+-- tombstone, OnJoin's AddMembers silently refuses the joiner, and the
+-- everyone-paints-alone desync comes back through the side door.
+local reinv = Portraits.Create("Reinvite", "MEMBERS", "nnnnnn", "Me-Testrealm")
+-- A third member stays behind so the revocation gossip has an audience.
+Portraits.AddMembers(reinv, { "Me-Testrealm", OTHER, "Ann-Testrealm" })
+Comm:SendKick(reinv, OTHER)
+Comm.queue = {}
+check(Comm:SendInvite(reinv, "other-testrealm") == true,
+    "the owner can re-invite a tombstoned member typed lowercase")
+check(not Portraits.IsRemoved(reinv, OTHER),
+    "the wrong-cased re-invite lifts the tombstone")
+check(sent("Mnnnnnn:+" .. OTHER) ~= nil,
+    "the revocation broadcast goes out despite the wrong-cased name")
+Comm:OnMessage("PixelParty", "Jnnnnnn", "WHISPER", OTHER)
+check(Portraits.IsMember(reinv, OTHER),
+    "the re-invited member lands back on the roster")
+local dupOk = Comm:SendInvite(reinv, "OTHER-testrealm")
+check(dupOk == false,
+    "re-inviting an existing member in the wrong case is refused as already-a-member")
+check(select(1, Comm:SendKick(reinv, "other-TESTREALM")) == true
+    and not Portraits.IsMember(reinv, OTHER) and Portraits.IsRemoved(reinv, OTHER),
+    "a wrong-cased uninvite removes and tombstones the canonical member")
+
+-- The owner-only re-invite rule must not be bypassable by a case typo.
+local notMineR = Portraits.Create("NotMineR", "MEMBERS", "oooooo", OWNER)
+Portraits.AddMembers(notMineR, { OWNER, "Me-Testrealm", "Ann-Testrealm" })
+Portraits.RemoveMembers(notMineR, { "Ann-Testrealm" })
+local nok, nerr = Comm:SendInvite(notMineR, "ann-testrealm")
+check(nok == false and nerr ~= nil and nerr:find("only they can bring them back", 1, true) ~= nil,
+    "a non-owner's wrong-cased re-invite of a tombstoned player is refused, not silently sent")
+
+-- A re-invite for a portrait we already hold is the inviter repairing a
+-- half-joined roster (our J ack was lost to a reload or a pre-fix case
+-- mismatch): re-ack it, but only for someone already on our own roster.
+-- Their side still demands the fresh pending invite their re-invite just
+-- recorded, so no new authority flows in either direction.
+local healP = Portraits.Create("Heal", "MEMBERS", "mmmmmm", OWNER)
+Portraits.AddMembers(healP, { OWNER, "Me-Testrealm" })
+Comm.queue = {}
+Comm:OnMessage("PixelParty", "Immmmmm:" .. OWNER .. ":64:Heal", "WHISPER", OWNER)
+local reack = sent("Jmmmmmm")
+check(reack ~= nil and reack.target == OWNER,
+    "a re-invite from a trusted member is re-acked with J")
+Comm.queue = {}
+Comm:OnMessage("PixelParty", "Immmmmm:" .. OTHER .. ":64:Heal", "WHISPER", OTHER)
+check(sent("Jmmmmmm") == nil,
+    "a re-invite from a non-member is ignored, not acked")
+
 -- SavedVariables migration and sanitising --------------------------------
 --
 -- Core owns the upgrade path for canvases people have already painted, so it
@@ -919,6 +996,49 @@ db = migrate({
 })
 check(#db.portraits["000000"].cells == Canvas.Cells(64),
     "cells past the canvas area are trimmed on load")
+
+-- Pending invites survive the reload that wipes Comm's session state ------
+--
+-- The invite is recorded in SavedVariables with a wall-clock expiry, so a
+-- /reload between sending it and the target's accept no longer silently
+-- discards the join ack.
+
+local pers = Portraits.Create("Persist", "MEMBERS", "qqqqqq", "Me-Testrealm")
+Portraits.AddMembers(pers, { "Me-Testrealm" })
+Comm.queue = {}
+check(Comm:SendInvite(pers, OTHER) == true, "the invite before the reload is sent")
+check(type(PP.db.pendingInvites) == "table" and next(PP.db.pendingInvites) ~= nil,
+    "a sent invite is recorded in SavedVariables")
+-- The reload: Comm.lua re-executes from scratch, ADDON_LOADED re-runs InitDB.
+loadModule("Comm.lua")
+Comm = PP.Comm
+eventHandler(nil, "ADDON_LOADED", "PixelParty")
+Comm:OnMessage("PixelParty", "Jqqqqqq", "WHISPER", OTHER)
+check(Portraits.IsMember(Portraits.Get("qqqqqq"), OTHER),
+    "the join ack is honored after a reload thanks to the persisted invite")
+
+-- InitDB sanitizes what rides in: junk and expired entries are dropped, and
+-- no expiry can outlive the TTL, so a corrupt file cannot mint an eternal
+-- invite.
+db = migrate({
+    dbVersion = 2,
+    portraits = { ["000000"] = { name = "Shared", dist = "AUTO", cells = Canvas.New(64), rev = 0 } },
+    pendingInvites = {
+        ["aaaaaa;bob-testrealm"] = time() + 99999, -- absurd future: clamped
+        ["aaaaaa;ann-testrealm"] = time() - 10,    -- expired: dropped
+        ["!!bad!;x-testrealm"] = time() + 60,      -- invalid portrait id: dropped
+        ["aaaaaa"] = time() + 60,                  -- malformed key: dropped
+        ["aaaaaa;eve-testrealm"] = "soon",         -- non-numeric expiry: dropped
+    },
+})
+check(db.pendingInvites["aaaaaa;ann-testrealm"] == nil
+    and db.pendingInvites["!!bad!;x-testrealm"] == nil
+    and db.pendingInvites["aaaaaa"] == nil
+    and db.pendingInvites["aaaaaa;eve-testrealm"] == nil,
+    "junk and expired pending invites are dropped on load")
+local clamped = db.pendingInvites["aaaaaa;bob-testrealm"]
+check(type(clamped) == "number" and clamped <= time() + PP.Comm.INVITE_TTL,
+    "a persisted invite expiry cannot outlive the TTL")
 
 --------------------------------------------------------------------------
 

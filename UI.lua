@@ -1730,6 +1730,9 @@ function UI:Uninvite(name)
         PP.Print("Who should be removed? /pixelparty uninvite <player>")
         return
     end
+    -- The membership pre-check below is case-sensitive; adopt the roster's
+    -- casing for whatever the player typed.
+    full = Portraits.ResolveName(p, full)
     if not Portraits.IsOwner(p, PP.PlayerFullName()) then
         PP.Print("Only the portrait's creator can uninvite members.")
         return

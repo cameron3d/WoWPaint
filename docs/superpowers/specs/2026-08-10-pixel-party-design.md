@@ -507,3 +507,68 @@ Desktop suite additions: palette integrity (64 well-formed entries, classic 16 b
 HSV spot anchors like pure red/green/blue at the vivid ring), `HSVToRGB`, round-trips of ops
 and snapshots at color 63, `SetPixel`/`Deserialize` bounds moved to 64, `PP.VersionAtLeast`
 parsing (absent and malformed versions read as legacy), and `Canvas.HasExtendedColors`.
+
+# Invite handshake reliability (2026-08-13, bug report)
+
+Field report: freshly created portraits stopped syncing after the invites went out — every
+member painted alone on "the same" portrait. Reproduced in a two-client desktop simulation
+driving the real modules through a fake chat layer, and root-caused to the join ack.
+
+## Root cause: the J ack was matched against the typed name
+
+`SendInvite` recorded the pending invite under the target name as typed (normalized only by
+appending the realm), while `OnJoin` looked the ack up under the canonical `CHAT_MSG_ADDON`
+sender. Whisper delivery is case-insensitive, so an invite typed `bob` still reached Bob;
+Bob created the portrait locally, announced "Joined portrait...", and whispered his J — which
+the inviter's lookup then missed, silently. From there the split is total and permanent: the
+inviter's roster never gains Bob, so members-only paint fan-out skips him; Bob's own strokes
+and hellos die at the inviter's `IsMember` trust gate; and the M roster gossip that would
+introduce invitees to each other never goes out. Neither side is told anything.
+
+## Fixes
+
+- **Case-insensitive invite matching.** Pending invites are keyed through `InviteKey`, which
+  folds the name half with `:lower()`. Names are unique case-insensitively in WoW, so the
+  fold cannot conflate two players. The portrait-id half stays exact — ids are
+  case-sensitive wire data. (`:lower()` folds ASCII only; a wrong-cased non-ASCII letter
+  still misses, exactly as every case missed before.)
+- **Typed names adopt stored casing.** `Portraits.ResolveName` resolves a typed name against
+  the roster and tombstones case-insensitively before the case-sensitive checks in
+  `SendInvite`, `SendKick`, and the UI's uninvite pre-check. Without it, a wrong-cased
+  re-invite of a previously uninvited member missed the tombstone: the Unremove and its
+  `+name` revocation broadcast never ran, every peer kept refusing the returning member, and
+  the everyone-paints-alone desync came back through the side door (with a false "joined"
+  print on both sides). It also let a non-owner's wrong-cased re-invite slip past the
+  owner-only rule, and made wrong-cased kicks fail with a false "is not a member".
+- **Re-invite is now a repair tool.** `OnInvite` used to silently drop invites for portraits
+  the receiver already holds, which meant a half-joined member could never be healed short of
+  deleting their copy (losing their paint). Now, a re-invite from a member the receiver
+  already trusts for that portrait is re-acked with a fresh J. No new authority flows in
+  either direction: the receiver only re-acks someone already on its own roster, and the
+  inviter's `OnJoin` still demands the live pending invite its own re-invite just recorded.
+  This heals rosters broken by older versions in the field: the creator just invites again.
+- **Pending invites persist.** They live in `PixelPartyDB.pendingInvites` with wall-clock
+  `time()` expiries (never `GetTime()` session uptime, which would read as unexpired for the
+  whole of a later session), so a `/reload` between sending an invite and the target's
+  accept no longer discards the ack. `InitDB` sanitizes on load: junk keys and expired
+  entries are dropped, and expiries are clamped to `time() + INVITE_TTL` so a corrupt file
+  cannot mint an eternal invite.
+
+## Accepted limits
+
+A hard crash never flushes SavedVariables, and an accept landing mid-`/reload` is delivered
+while no event handler is registered; both still lose the ack — but the re-invite repair now
+recovers every such case manually. Non-ASCII case folding stays out until it is ever
+reported: WoW canonicalizes name casing server-side, so the ASCII fold covers the realistic
+typing mismatches.
+
+## Testing
+
+Desktop suite additions: the lowercase-typed invite admits the canonical J ack and the
+roster gossip follows; `ResolveName` casing adoption (roster, tombstone, pass-through);
+wrong-cased tombstone re-invite lifts the tombstone, broadcasts the revocation, and re-admits
+the joiner; wrong-cased re-invite of a member is refused as already-a-member; wrong-cased
+kick tombstones the canonical name; the non-owner re-invite guard holds under wrong casing;
+re-invites for held portraits are re-acked from trusted members only; pending invites survive
+a simulated reload (module re-execution plus `ADDON_LOADED`) and are honored after it; and
+the `InitDB` sanitizer drops junk and clamps expiries.
